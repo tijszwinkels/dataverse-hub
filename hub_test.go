@@ -23,7 +23,7 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 
 	index := NewIndex()
 	limiter := NewRateLimiter(1000, 100000) // generous limits for tests
-	hub := NewHub(store, index, limiter)
+	hub := NewHub(store, index, limiter, false)
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, func() {
@@ -322,6 +322,68 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 	if len(inbound) == 0 {
 		t.Error("expected inbound relations to root after rebuild")
 	}
+}
+
+func TestETagAndNotModified(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	data := loadTestFixture(t, "root.json")
+	var env Envelope
+	json.Unmarshal(data, &env)
+	var item Item
+	json.Unmarshal(env.Item, &item)
+	ref := item.Ref()
+
+	// PUT
+	resp := doPut(t, ts, ref, data)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// GET without If-None-Match: should return 200 with ETag
+	resp = doGet(t, ts, "/v1/objects/"+ref)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET expected 200, got %d", resp.StatusCode)
+	}
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if len(body) == 0 {
+		t.Fatal("expected body on 200")
+	}
+
+	// GET with matching If-None-Match: should return 304 with no body
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+ref, nil)
+	req.Header.Set("If-None-Match", etag)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusNotModified {
+		t.Fatalf("expected 304, got %d", resp.StatusCode)
+	}
+	body304, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if len(body304) != 0 {
+		t.Errorf("expected empty body on 304, got %d bytes", len(body304))
+	}
+
+	// GET with non-matching If-None-Match: should return 200
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+ref, nil)
+	req.Header.Set("If-None-Match", `"999"`)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for non-matching etag, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }
 
 func TestRateLimitHeaders(t *testing.T) {

@@ -83,4 +83,5 @@ type Config struct {
 	StoreDir        string
 	RateLimitPerMin int
 	RateLimitPerDay int
+	Verbose         bool
 }
