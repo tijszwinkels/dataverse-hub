@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -67,6 +68,16 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
+	}
+
+	// Serve HTML if browser requests it and object is/has a PAGE
+	if acceptsHTML(r) {
+		if html := h.resolvePageHTML(data); html != "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, html)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -269,6 +280,72 @@ func (h *Hub) enrichWithInboundCounts(items []json.RawMessage, refs []string) []
 		enriched[i] = result
 	}
 	return enriched
+}
+
+// acceptsHTML returns true if the request Accept header includes text/html.
+func acceptsHTML(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mt := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if mt == "text/html" {
+			return true
+		}
+	}
+	return false
+}
+
+// resolvePageHTML extracts HTML content from a PAGE object, or follows a `page`
+// relation to find one. Returns empty string if no HTML can be resolved.
+func (h *Hub) resolvePageHTML(data []byte) string {
+	env, item, err := ParseEnvelope(data)
+	if err != nil {
+		return ""
+	}
+	_ = env
+
+	// Case 1: object itself is a PAGE
+	if item.Type == "PAGE" {
+		return extractHTML(item)
+	}
+
+	// Case 2: object has a `page` relation — follow the first ref
+	pageRels, ok := item.Relations["page"]
+	if !ok || len(pageRels) == 0 {
+		return ""
+	}
+	var rel RelationRef
+	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
+		log.Printf("WARN: resolvePageHTML: invalid page relation: %v", err)
+		return ""
+	}
+	pageData, err := h.store.Read(rel.Ref)
+	if err != nil || pageData == nil {
+		log.Printf("WARN: resolvePageHTML: page ref %s not found: %v", rel.Ref, err)
+		return ""
+	}
+	_, pageItem, err := ParseEnvelope(pageData)
+	if err != nil {
+		log.Printf("WARN: resolvePageHTML: failed to parse page %s: %v", rel.Ref, err)
+		return ""
+	}
+	if pageItem.Type != "PAGE" {
+		log.Printf("WARN: resolvePageHTML: page ref %s is type %q, not PAGE", rel.Ref, pageItem.Type)
+		return ""
+	}
+	return extractHTML(pageItem)
+}
+
+// extractHTML pulls the html string from item.content.html.
+func extractHTML(item *Item) string {
+	if item.Content == nil {
+		return ""
+	}
+	var content struct {
+		HTML string `json:"html"`
+	}
+	if err := json.Unmarshal(item.Content, &content); err != nil {
+		return ""
+	}
+	return content.HTML
 }
 
 func parseLimit(s string, defaultVal, maxVal int) int {

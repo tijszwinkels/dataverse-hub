@@ -499,6 +499,148 @@ func TestRateLimitHeaders(t *testing.T) {
 	resp.Body.Close()
 }
 
+// --- PAGE content negotiation tests ---
+
+func doGetWithAccept(t *testing.T, ts *httptest.Server, path, accept string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	req.Header.Set("Accept", accept)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func putFixture(t *testing.T, ts *httptest.Server, name string) {
+	t.Helper()
+	data := loadTestFixture(t, name)
+	var env Envelope
+	json.Unmarshal(data, &env)
+	var item Item
+	json.Unmarshal(env.Item, &item)
+	resp := doPut(t, ts, item.Ref(), data)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT %s: expected 201, got %d: %s", name, resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
+func TestPageServedAsHTML(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	// Browser request (Accept: text/html) should return HTML
+	resp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html content-type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected HTML body, got: %s", body)
+	}
+}
+
+func TestPageServedAsJSONWithoutAcceptHTML(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	// API request (no Accept or Accept: application/json) should return JSON
+	resp := doGet(t, ts, "/v1/objects/"+pageRef)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var env Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected valid JSON envelope, got: %s", body)
+	}
+}
+
+func TestPageRelationRedirect(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	putFixture(t, ts, "app_with_page.json")
+
+	appRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.bbbbbbbb-cccc-4ddd-eeee-ffffffffffff"
+
+	// Browser request for the app should serve the page's HTML
+	resp := doGetWithAccept(t, ts, "/v1/objects/"+appRef, "text/html")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html content-type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected page HTML, got: %s", body)
+	}
+}
+
+func TestPageRelationJSONForAPI(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	putFixture(t, ts, "app_with_page.json")
+
+	appRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.bbbbbbbb-cccc-4ddd-eeee-ffffffffffff"
+
+	// API request for the app should still return JSON
+	resp := doGetWithAccept(t, ts, "/v1/objects/"+appRef, "application/json")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var env Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected valid JSON envelope, got: %s", body)
+	}
+}
+
+func TestPageMissingHTMLField(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	// Use the root object (type ROOT, no html field) with Accept: text/html
+	putFixture(t, ts, "root.json")
+
+	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
+	resp := doGetWithAccept(t, ts, "/v1/objects/"+rootRef, "text/html")
+	// Should fall back to JSON since root is not a PAGE and has no page relation
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/json" {
+		t.Errorf("expected JSON fallback, got content-type %q", ct)
+	}
+	resp.Body.Close()
+}
+
 // --- helpers ---
 
 func doPut(t *testing.T, ts *httptest.Server, ref string, body []byte) *http.Response {
