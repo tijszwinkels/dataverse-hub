@@ -15,21 +15,14 @@ import (
 
 const maxBodySize = 1 << 20 // 1 MB
 
-// handleRoot serves GET / — returns the ROOT object.
+// handleRoot serves GET / — redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 	metas := h.index.GetAll("", "ROOT")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
 	}
-	data, err := h.store.Read(metas[0].Ref)
-	if err != nil || data == nil {
-		log.Printf("ERROR: GET /: read root %s: %v", metas[0].Ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	http.Redirect(w, r, "/v1/objects/"+metas[0].Ref, http.StatusFound)
 }
 
 // handleGetObject serves GET /v1/objects/{ref}
