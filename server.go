@@ -51,9 +51,9 @@ func (h *Hub) requestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(ww, r)
 		if h.verbose {
-			log.Printf("%s %s %d %s ua=%q", r.Method, r.RequestURI, ww.Status(), time.Since(start).Round(time.Millisecond), r.UserAgent())
+			log.Printf("%s %s %d %s ua=%q", r.Method, r.RequestURI, ww.Status(), time.Since(start), r.UserAgent())
 		} else {
-			log.Printf("%s %s %d %s", r.Method, r.RequestURI, ww.Status(), time.Since(start).Round(time.Millisecond))
+			log.Printf("%s %s %d %s", r.Method, r.RequestURI, ww.Status(), time.Since(start))
 		}
 	})
 }
