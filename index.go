@@ -181,6 +181,18 @@ func (idx *Index) GetMeta(ref string) (ObjectMeta, bool) {
 	return m, ok
 }
 
+// GetInboundCounts returns a map of relation_type -> count for all inbound relations to targetRef.
+func (idx *Index) GetInboundCounts(targetRef string) map[string]int {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+
+	counts := make(map[string]int)
+	for _, e := range idx.inbound[targetRef] {
+		counts[e.RelationType]++
+	}
+	return counts
+}
+
 // addLocked adds to all index maps. Caller must hold write lock.
 func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 	// Meta

@@ -324,6 +324,105 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 	}
 }
 
+func TestInboundCounts(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+
+	// root is referenced by identity and core_types via "root" relation
+	// and by core_types via "core_types" relation from root itself
+	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
+
+	// List objects with include=inbound_counts
+	resp := doGet(t, ts, "/v1/objects?include=inbound_counts")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	// Find root in response and check _inbound_counts
+	for _, raw := range list.Items {
+		var obj map[string]json.RawMessage
+		json.Unmarshal(raw, &obj)
+
+		var item Item
+		json.Unmarshal(obj["item"], &item)
+		if item.Ref() != rootRef {
+			continue
+		}
+
+		countsRaw, ok := obj["_inbound_counts"]
+		if !ok {
+			t.Fatal("root object missing _inbound_counts field")
+		}
+		var counts map[string]int
+		if err := json.Unmarshal(countsRaw, &counts); err != nil {
+			t.Fatalf("failed to parse _inbound_counts: %v", err)
+		}
+		// identity and core_types both have "root" relation to root
+		if counts["root"] < 2 {
+			t.Errorf("expected root relation count >= 2, got %d", counts["root"])
+		}
+		return
+	}
+	t.Error("root object not found in response")
+}
+
+func TestInboundCountsOnInbound(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+
+	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
+
+	// Get inbound to root with include=inbound_counts
+	resp := doGet(t, ts, "/v1/objects/"+rootRef+"/inbound?include=inbound_counts")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	if len(list.Items) == 0 {
+		t.Fatal("expected at least 1 inbound item")
+	}
+
+	// Every item should have _inbound_counts field
+	for _, raw := range list.Items {
+		var obj map[string]json.RawMessage
+		json.Unmarshal(raw, &obj)
+		if _, ok := obj["_inbound_counts"]; !ok {
+			t.Error("inbound item missing _inbound_counts field")
+		}
+	}
+}
+
+func TestNoInboundCountsWithoutParam(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+
+	// Without include=inbound_counts, items should NOT have the field
+	resp := doGet(t, ts, "/v1/objects")
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	for _, raw := range list.Items {
+		var obj map[string]json.RawMessage
+		json.Unmarshal(raw, &obj)
+		if _, ok := obj["_inbound_counts"]; ok {
+			t.Error("_inbound_counts should not be present without include param")
+		}
+	}
+}
+
 func TestETagAndNotModified(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()

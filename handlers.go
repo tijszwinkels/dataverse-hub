@@ -161,13 +161,19 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 // handleListObjects serves GET /v1/objects
 func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
-	pubkey := r.URL.Query().Get("by")
-	typeFilter := r.URL.Query().Get("type")
-	limit := parseLimit(r.URL.Query().Get("limit"), 50, 200)
-	cursor := parseCursor(r.URL.Query().Get("cursor"))
+	q := r.URL.Query()
+	pubkey := q.Get("by")
+	typeFilter := q.Get("type")
+	limit := parseLimit(q.Get("limit"), 50, 200)
+	cursor := parseCursor(q.Get("cursor"))
+	includeInboundCounts := q.Get("include") == "inbound_counts"
 
 	metas := h.index.GetAll(pubkey, typeFilter)
-	items, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+
+	if includeInboundCounts {
+		items = h.enrichWithInboundCounts(items, refs)
+	}
 
 	writeList(w, items, nextCursor, hasMore)
 }
@@ -184,15 +190,21 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
+	includeInboundCounts := q.Get("include") == "inbound_counts"
 
 	metas := h.index.GetInbound(ref, filters)
-	items, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+
+	if includeInboundCounts {
+		items = h.enrichWithInboundCounts(items, refs)
+	}
 
 	writeList(w, items, nextCursor, hasMore)
 }
 
 // paginateAndLoad applies cursor/limit to sorted metas, then loads the actual objects.
-func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]json.RawMessage, *string, bool) {
+// Returns items, their refs (parallel arrays), cursor, and hasMore.
+func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]json.RawMessage, []string, *string, bool) {
 	// Apply cursor: skip items until we pass the cursor position
 	if cursor != nil {
 		idx := 0
@@ -212,6 +224,7 @@ func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]
 	}
 
 	var items []json.RawMessage
+	var refs []string
 	for _, m := range metas {
 		data, err := h.store.Read(m.Ref)
 		if err != nil || data == nil {
@@ -219,6 +232,7 @@ func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]
 			continue
 		}
 		items = append(items, json.RawMessage(data))
+		refs = append(refs, m.Ref)
 	}
 
 	var nextCursor *string
@@ -230,7 +244,31 @@ func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]
 		nextCursor = &s
 	}
 
-	return items, nextCursor, hasMore
+	return items, refs, nextCursor, hasMore
+}
+
+// enrichWithInboundCounts adds _inbound_counts to each item in the list.
+func (h *Hub) enrichWithInboundCounts(items []json.RawMessage, refs []string) []json.RawMessage {
+	enriched := make([]json.RawMessage, len(items))
+	for i, item := range items {
+		counts := h.index.GetInboundCounts(refs[i])
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(item, &obj); err != nil {
+			log.Printf("WARN: enrich skip %s: unmarshal: %v", refs[i], err)
+			enriched[i] = item
+			continue
+		}
+		countsJSON, _ := json.Marshal(counts)
+		obj["_inbound_counts"] = countsJSON
+		result, err := json.Marshal(obj)
+		if err != nil {
+			log.Printf("WARN: enrich skip %s: marshal: %v", refs[i], err)
+			enriched[i] = item
+			continue
+		}
+		enriched[i] = result
+	}
+	return enriched
 }
 
 func parseLimit(s string, defaultVal, maxVal int) int {
