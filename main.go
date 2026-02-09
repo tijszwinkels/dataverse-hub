@@ -31,7 +31,7 @@ func main() {
 	limiter := NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
-	hub := NewHub(store, index, limiter, cfg.Verbose)
+	hub := NewHub(store, index, limiter)
 	srv := &http.Server{
 		Addr:         cfg.Addr,
 		Handler:      hub.Router(),
@@ -69,7 +69,6 @@ func loadConfig() Config {
 		StoreDir:        envOr("HUB_STORE_DIR", "./dataverse001"),
 		RateLimitPerMin: envOrInt("HUB_RATE_LIMIT_PER_MIN", 60),
 		RateLimitPerDay: envOrInt("HUB_RATE_LIMIT_PER_DAY", 10000),
-		Verbose:         os.Getenv("HUB_VERBOSE") == "1",
 	}
 }
 
