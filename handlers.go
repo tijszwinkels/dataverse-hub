@@ -55,22 +55,32 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			etag = `"` + strconv.Itoa(item.Revision) + `"`
 		}
 	}
+	// Response varies by Accept header (HTML vs JSON for PAGE objects)
+	w.Header().Set("Vary", "Accept")
+
+	// Resolve HTML representation before setting ETag
+	var html string
+	if acceptsHTML(r) {
+		html = h.resolvePageHTML(data)
+	}
+
+	// ETag includes representation suffix so HTML and JSON are cached separately
+	if html != "" {
+		etag = etag[:len(etag)-1] + `-html"`
+	}
 	w.Header().Set("ETag", etag)
 
-	// 304 Not Modified if client has this revision
+	// 304 Not Modified if client has this revision+representation
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	// Serve HTML if browser requests it and object is/has a PAGE
-	if acceptsHTML(r) {
-		if html := h.resolvePageHTML(data); html != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, html)
-			return
-		}
+	if html != "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, html)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)

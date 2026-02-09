@@ -621,6 +621,82 @@ func TestPageRelationJSONForAPI(t *testing.T) {
 	}
 }
 
+func TestVaryHeaderPresent(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	// Both HTML and JSON responses must include Vary: Accept
+	for _, accept := range []string{"text/html", "application/json"} {
+		resp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, accept)
+		vary := resp.Header.Get("Vary")
+		if vary != "Accept" {
+			t.Errorf("Accept=%q: expected Vary: Accept, got %q", accept, vary)
+		}
+		resp.Body.Close()
+	}
+}
+
+func TestETagDiffersByRepresentation(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	// Get ETag for HTML representation
+	htmlResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	htmlETag := htmlResp.Header.Get("ETag")
+	htmlResp.Body.Close()
+
+	// Get ETag for JSON representation
+	jsonResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "application/json")
+	jsonETag := jsonResp.Header.Get("ETag")
+	jsonResp.Body.Close()
+
+	if htmlETag == jsonETag {
+		t.Errorf("HTML and JSON ETags must differ, both are %q", htmlETag)
+	}
+	if htmlETag == "" || jsonETag == "" {
+		t.Errorf("ETags must not be empty: html=%q json=%q", htmlETag, jsonETag)
+	}
+}
+
+func TestETagNotModifiedRespectsRepresentation(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	// Get the HTML ETag
+	htmlResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	htmlETag := htmlResp.Header.Get("ETag")
+	htmlResp.Body.Close()
+
+	// HTML ETag should produce 304 for HTML request
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+pageRef, nil)
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("If-None-Match", htmlETag)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotModified {
+		t.Errorf("HTML ETag + HTML Accept: expected 304, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// HTML ETag should NOT produce 304 for JSON request
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+pageRef, nil)
+	req2.Header.Set("Accept", "application/json")
+	req2.Header.Set("If-None-Match", htmlETag)
+	resp2, _ := http.DefaultClient.Do(req2)
+	if resp2.StatusCode == http.StatusNotModified {
+		t.Errorf("HTML ETag + JSON Accept: should NOT get 304")
+	}
+	resp2.Body.Close()
+}
+
 func TestPageMissingHTMLField(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()
