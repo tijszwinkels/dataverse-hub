@@ -14,6 +14,23 @@ import (
 
 const maxBodySize = 1 << 20 // 1 MB
 
+// handleRoot serves GET / — returns the ROOT object.
+func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
+	metas := h.index.GetAll("", "ROOT")
+	if len(metas) == 0 {
+		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
+		return
+	}
+	data, err := h.store.Read(metas[0].Ref)
+	if err != nil || data == nil {
+		log.Printf("ERROR: GET /: read root %s: %v", metas[0].Ref, err)
+		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
 // handleGetObject serves GET /v1/objects/{ref}
 func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
@@ -26,6 +43,29 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	if data == nil {
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
+
+	// ETag = revision number (objects are immutable at a given revision)
+	meta, _ := h.index.GetMeta(ref)
+	etag := `"0"`
+	if meta.Ref != "" {
+		// Parse revision from stored data to get exact value
+		var env Envelope
+		var item Item
+		if err := json.Unmarshal(data, &env); err != nil {
+			log.Printf("WARN: GET /objects/%s: failed to parse envelope for ETag: %v", ref, err)
+		} else if err := json.Unmarshal(env.Item, &item); err != nil {
+			log.Printf("WARN: GET /objects/%s: failed to parse item for ETag: %v", ref, err)
+		} else {
+			etag = `"` + strconv.Itoa(item.Revision) + `"`
+		}
+	}
+	w.Header().Set("ETag", etag)
+
+	// 304 Not Modified if client has this revision
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 

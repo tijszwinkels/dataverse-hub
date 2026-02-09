@@ -1,7 +1,9 @@
 package main
 
 import (
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -24,10 +26,12 @@ func (h *Hub) Router() http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
+	r.Use(requestLogger)
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
 	r.Use(jsonContentType)
+
+	r.Get("/", h.handleRoot)
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Get("/objects", h.handleListObjects)
@@ -37,6 +41,16 @@ func (h *Hub) Router() http.Handler {
 	})
 
 	return r
+}
+
+// requestLogger logs method, path, status, duration, and user-agent.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		start := time.Now()
+		next.ServeHTTP(ww, r)
+		log.Printf("%s %s %d %s ua=%q", r.Method, r.RequestURI, ww.Status(), time.Since(start).Round(time.Millisecond), r.UserAgent())
+	})
 }
 
 // jsonContentType sets the Content-Type header to application/json.
