@@ -31,7 +31,7 @@ func main() {
 	defer limiter.Stop()
 
 	var handler http.Handler
-	var pendingStop func() // cleanup for proxy mode
+	var proxyCleanup []func() // cleanup functions for proxy mode
 
 	switch cfg.Mode {
 	case "root":
@@ -50,10 +50,13 @@ func main() {
 			log.Printf("Upstream %s is reachable", cfg.UpstreamURL)
 		}
 
+		upstream.StartHealthChecker(30 * time.Second)
+		proxyCleanup = append(proxyCleanup, upstream.Stop)
+
 		pendingDir := filepath.Join(cfg.StoreDir, "sync_pending")
 		pending := NewSyncPending(pendingDir, upstream, store, index)
 		pending.Start()
-		pendingStop = pending.Stop
+		proxyCleanup = append(proxyCleanup, pending.Stop)
 
 		proxy := NewProxy(store, index, limiter, cfg.DefaultViewerRef, upstream, pending)
 		handler = proxy.Router()
@@ -75,8 +78,8 @@ func main() {
 		sig := <-sigCh
 		log.Printf("Received %v, shutting down...", sig)
 
-		if pendingStop != nil {
-			pendingStop()
+		for _, fn := range proxyCleanup {
+			fn()
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
