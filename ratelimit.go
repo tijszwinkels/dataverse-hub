@@ -124,24 +124,61 @@ func (rl *RateLimiter) cleanup() {
 	}
 }
 
+// Refund gives back one token to both per-minute and per-day windows.
+// Used to exempt 304 Not Modified responses from rate limiting.
+func (rl *RateLimiter) Refund(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	if wm, ok := rl.perMin[ip]; ok && now.Before(wm.resetAt) && wm.count > 0 {
+		wm.count--
+	}
+	if wd, ok := rl.perDay[ip]; ok && now.Before(wd.resetAt) && wd.count > 0 {
+		wd.count--
+	}
+}
+
+// statusCapture wraps http.ResponseWriter to capture the status code.
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sc *statusCapture) WriteHeader(code int) {
+	sc.status = code
+	sc.ResponseWriter.WriteHeader(code)
+}
+
 // Middleware returns an HTTP middleware that enforces rate limits.
+// 304 Not Modified responses are refunded and do not consume tokens.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := r.RemoteAddr // chi's RealIP middleware sets this
 
 		allowed, retryAfter := rl.Allow(ip)
-		minRem, _ := rl.Remaining(ip)
-
-		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(rl.maxPerMin))
-		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(minRem))
-		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(retryAfter).Unix(), 10))
 
 		if !allowed {
+			w.Header().Set("X-RateLimit-Limit", strconv.Itoa(rl.maxPerMin))
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(retryAfter).Unix(), 10))
 			w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
 			http.Error(w, `{"error":"rate limit exceeded","code":"RATE_LIMITED"}`, http.StatusTooManyRequests)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Set rate-limit headers before handler (handler calls WriteHeader)
+		minRem, _ := rl.Remaining(ip)
+		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(rl.maxPerMin))
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(minRem))
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10))
+
+		sc := &statusCapture{ResponseWriter: w, status: 200}
+		next.ServeHTTP(sc, r)
+
+		// Refund if 304 — these shouldn't count against rate limits
+		if sc.status == http.StatusNotModified {
+			rl.Refund(ip)
+		}
 	})
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
@@ -13,8 +14,6 @@ import (
 
 func main() {
 	cfg := loadConfig()
-
-	log.Printf("Starting dataverse hub on %s (store: %s, viewer: %s)", cfg.Addr, cfg.StoreDir, cfg.DefaultViewerRef)
 
 	store, err := NewStore(cfg.StoreDir)
 	if err != nil {
@@ -31,10 +30,38 @@ func main() {
 	limiter := NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
-	hub := NewHub(store, index, limiter, cfg.DefaultViewerRef)
+	var handler http.Handler
+	var pendingStop func() // cleanup for proxy mode
+
+	switch cfg.Mode {
+	case "root":
+		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
+		hub := NewHub(store, index, limiter, cfg.DefaultViewerRef)
+		handler = hub.Router()
+
+	default: // "proxy" is the default
+		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
+		upstream := NewUpstream(cfg.UpstreamURL)
+
+		// Probe upstream before serving
+		if err := upstream.HealthCheck(); err != nil {
+			log.Printf("WARN: upstream %s unreachable at startup: %v", cfg.UpstreamURL, err)
+		} else {
+			log.Printf("Upstream %s is reachable", cfg.UpstreamURL)
+		}
+
+		pendingDir := filepath.Join(cfg.StoreDir, "sync_pending")
+		pending := NewSyncPending(pendingDir, upstream, store, index)
+		pending.Start()
+		pendingStop = pending.Stop
+
+		proxy := NewProxy(store, index, limiter, cfg.DefaultViewerRef, upstream, pending)
+		handler = proxy.Router()
+	}
+
 	srv := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      hub.Router(),
+		Handler:      handler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -47,6 +74,10 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		sig := <-sigCh
 		log.Printf("Received %v, shutting down...", sig)
+
+		if pendingStop != nil {
+			pendingStop()
+		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -65,10 +96,12 @@ func main() {
 
 func loadConfig() Config {
 	return Config{
-		Addr:             envOr("HUB_ADDR", ":8080"),
+		Mode:             envOr("DATAVERSE_MODE", "proxy"),
+		UpstreamURL:      envOr("DATAVERSE_UPSTREAM_URL", "https://dataverse001.net"),
+		Addr:             envOr("HUB_ADDR", ":5678"),
 		StoreDir:         envOr("HUB_STORE_DIR", "./dataverse001"),
-		RateLimitPerMin:  envOrInt("HUB_RATE_LIMIT_PER_MIN", 60),
-		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 10000),
+		RateLimitPerMin:  envOrInt("HUB_RATE_LIMIT_PER_MIN", 120),
+		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 20000),
 		DefaultViewerRef: envOr("HUB_DEFAULT_VIEWER_REF", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"),
 	}
 }
