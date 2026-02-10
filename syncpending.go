@@ -70,6 +70,18 @@ func (sp *SyncPending) Remove(ref string) error {
 	return os.Remove(filepath.Join(sp.dir, ref+".json"))
 }
 
+// reject moves a pending object to sync_rejected/ so it doesn't block the queue.
+func (sp *SyncPending) reject(ref string) {
+	rejDir := filepath.Join(filepath.Dir(sp.dir), "sync_rejected")
+	os.MkdirAll(rejDir, 0755)
+	src := filepath.Join(sp.dir, ref+".json")
+	dst := filepath.Join(rejDir, ref+".json")
+	if err := os.Rename(src, dst); err != nil {
+		log.Printf("[proxy] WARN: sync rejected move %s: %v", ref, err)
+		os.Remove(src) // at least unblock the queue
+	}
+}
+
 // List returns all refs in the sync_pending directory.
 func (sp *SyncPending) List() ([]string, error) {
 	entries, err := os.ReadDir(sp.dir)
@@ -203,10 +215,18 @@ func (sp *SyncPending) pushOne(ref string) bool {
 		sp.fetchAndCache(ref)
 		return true
 
+	case resp.StatusCode >= 400 && resp.StatusCode < 500:
+		// Permanent client error — our data is bad, won't succeed on retry
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("[proxy] WARN: sync pending push %s rejected (%d): %s", ref, resp.StatusCode, body)
+		sp.reject(ref)
+		return true // continue with next object
+
 	default:
+		// Server error (5xx) — upstream is struggling, stop and retry later
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("[proxy] WARN: sync pending push %s: upstream returned %d: %s", ref, resp.StatusCode, body)
-		return false // unexpected error, stop draining
+		return false
 	}
 }
 
