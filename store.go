@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,15 +11,42 @@ import (
 
 // Store handles flat-file object storage, compatible with the dataverse filesystem spec.
 type Store struct {
-	dir string
+	dir           string
+	backupEnabled bool
 }
 
 // NewStore creates a store rooted at the given directory.
-func NewStore(dir string) (*Store, error) {
+func NewStore(dir string, backupEnabled bool) (*Store, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create store dir: %w", err)
 	}
-	return &Store{dir: dir}, nil
+	return &Store{dir: dir, backupEnabled: backupEnabled}, nil
+}
+
+// Backup moves the current version of an object to bk/{ref}.r{revision}.json.
+// No-op if backups are disabled or the file doesn't exist.
+func (s *Store) Backup(ref string, revision int) error {
+	if !s.backupEnabled {
+		return nil
+	}
+
+	src := filepath.Join(s.dir, ref+".json")
+	if _, err := os.Stat(src); os.IsNotExist(err) {
+		return nil
+	}
+
+	bkDir := filepath.Join(s.dir, "bk")
+	if err := os.MkdirAll(bkDir, 0755); err != nil {
+		return fmt.Errorf("create bk dir: %w", err)
+	}
+
+	dst := filepath.Join(bkDir, fmt.Sprintf("%s.r%d.json", ref, revision))
+	if err := os.Rename(src, dst); err != nil {
+		return fmt.Errorf("backup %s: %w", ref, err)
+	}
+
+	log.Printf("backup %s rev %d -> bk/", ref, revision)
+	return nil
 }
 
 // Read returns the raw bytes of the object with the given ref.

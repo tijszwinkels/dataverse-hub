@@ -93,7 +93,7 @@ func TestSyncPendingDrainPushesAndRemoves(t *testing.T) {
 	upstream := NewUpstream(mockUpstream.URL)
 
 	storeDir := t.TempDir()
-	store, _ := NewStore(storeDir)
+	store, _ := NewStore(storeDir, true)
 	index := NewIndex()
 
 	sp := NewSyncPending(dir, upstream, store, index)

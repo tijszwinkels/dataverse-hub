@@ -88,4 +88,5 @@ type Config struct {
 	RateLimitPerMin  int
 	RateLimitPerDay  int
 	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
+	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
 }

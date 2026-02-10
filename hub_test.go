@@ -16,7 +16,7 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := NewStore(dir)
+	store, err := NewStore(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +306,7 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 		os.WriteFile(filepath.Join(dir, ref+".json"), data, 0644)
 	}
 
-	store, _ := NewStore(dir)
+	store, _ := NewStore(dir, true)
 	index := NewIndex()
 	count, _, err := index.Rebuild(store)
 	if err != nil {

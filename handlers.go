@@ -174,6 +174,13 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Backup old version before overwriting
+	if isUpdate {
+		if err := h.store.Backup(ref, existingMeta.Revision); err != nil {
+			log.Printf("WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		}
+	}
+
 	// Write to store
 	if err := h.store.Write(ref, canonical, ts); err != nil {
 		log.Printf("ERROR: PUT /%s: write: %v", ref, err)

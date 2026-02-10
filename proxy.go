@@ -190,6 +190,12 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
+		// Backup old version before caching
+		if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
+			if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+				log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+			}
+		}
 		// Cache locally
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
@@ -352,6 +358,13 @@ func (p *Proxy) cacheLocally(ref string, data []byte) {
 		log.Printf("[proxy] WARN: cache %s: parse: %v", ref, err)
 		return
 	}
+	// Backup old version before caching newer one
+	if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate && existingMeta.Revision < item.Revision {
+		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+			log.Printf("[proxy] WARN: cache %s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		}
+	}
+
 	ts, _ := item.Timestamp()
 	if err := p.store.Write(ref, data, ts); err != nil {
 		log.Printf("[proxy] WARN: cache %s: write: %v", ref, err)
@@ -551,6 +564,13 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
 		return
+	}
+
+	// Backup old version before overwriting
+	if isUpdate {
+		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+			log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		}
 	}
 
 	// Write to sync_pending first (crash safety)

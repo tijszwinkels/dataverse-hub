@@ -15,9 +15,12 @@ import (
 func main() {
 	cfg := loadConfig()
 
-	store, err := NewStore(cfg.StoreDir)
+	store, err := NewStore(cfg.StoreDir, cfg.BackupEnabled)
 	if err != nil {
 		log.Fatalf("Failed to initialize store: %v", err)
+	}
+	if cfg.BackupEnabled {
+		log.Printf("Revision backups enabled (bk/ directory)")
 	}
 
 	index := NewIndex()
@@ -106,6 +109,7 @@ func loadConfig() Config {
 		RateLimitPerMin:  envOrInt("HUB_RATE_LIMIT_PER_MIN", 120),
 		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 20000),
 		DefaultViewerRef: envOr("HUB_DEFAULT_VIEWER_REF", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"),
+		BackupEnabled:    envOr("HUB_BACKUP_ENABLED", "true") == "true",
 	}
 }
 

@@ -18,7 +18,7 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 
 	// Root hub
 	rootDir := t.TempDir()
-	rootStore, _ := NewStore(rootDir)
+	rootStore, _ := NewStore(rootDir, true)
 	rootIndex := NewIndex()
 	rootLimiter := NewRateLimiter(10000, 1000000)
 	rootHub := NewHub(rootStore, rootIndex, rootLimiter, "")
@@ -26,7 +26,7 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 
 	// Proxy
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir)
+	proxyStore, _ := NewStore(proxyDir, true)
 	proxyIndex := NewIndex()
 	proxyLimiter := NewRateLimiter(10000, 1000000)
 	upstream := NewUpstream(rootSrv.URL)
@@ -186,7 +186,7 @@ func TestProxyPutUpstreamDown(t *testing.T) {
 
 func TestProxyPutSyncPendingCreated(t *testing.T) {
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir)
+	proxyStore, _ := NewStore(proxyDir, true)
 	proxyIndex := NewIndex()
 	proxyLimiter := NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
@@ -371,7 +371,7 @@ func TestProxyGet502FallsBackToCache(t *testing.T) {
 	defer badUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir)
+	proxyStore, _ := NewStore(proxyDir, true)
 	proxyIndex := NewIndex()
 	proxyLimiter := NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
@@ -413,7 +413,7 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 	defer badUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir)
+	proxyStore, _ := NewStore(proxyDir, true)
 	proxyIndex := NewIndex()
 	proxyLimiter := NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
