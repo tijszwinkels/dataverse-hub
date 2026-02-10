@@ -112,7 +112,13 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 
 	default:
-		// Forward upstream error
+		if isUpstreamDown(resp.StatusCode) {
+			log.Printf("[proxy] WARN: GET /%s: upstream returned %d, falling back to cache", ref, resp.StatusCode)
+			io.Copy(io.Discard, resp.Body)
+			p.serveFromLocalCache(w, r, ref, clientETag)
+			return
+		}
+		// Forward non-gateway upstream error (4xx, etc.)
 		body, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
@@ -230,6 +236,13 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 		return
 	}
 	defer resp.Body.Close()
+
+	if isUpstreamDown(resp.StatusCode) {
+		log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
+		io.Copy(io.Discard, resp.Body)
+		p.serveLocalList(w, r)
+		return
+	}
 
 	// Forward upstream response directly
 	body, _ := io.ReadAll(resp.Body)
@@ -562,6 +575,15 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		"status": "pending_sync",
 		"ref":    ref,
 	})
+}
+
+// isUpstreamDown returns true for HTTP status codes that indicate the upstream
+// server is down (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
+// These warrant a fallback to the local cache rather than forwarding to the client.
+func isUpstreamDown(statusCode int) bool {
+	return statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
 }
 
 // encodeBase64Cursor encodes cursor bytes as base64url.

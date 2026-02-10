@@ -360,3 +360,84 @@ func TestProxyClientETagNoCacheMustFetch(t *testing.T) {
 		t.Errorf("expected 200 (proxy must fetch from upstream), got %d", resp.StatusCode)
 	}
 }
+
+// TestProxyGet502FallsBackToCache verifies that when upstream returns 502
+// (server down behind a reverse proxy), the proxy falls back to local cache.
+func TestProxyGet502FallsBackToCache(t *testing.T) {
+	// Set up a fake upstream that returns 502
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer badUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := NewStore(proxyDir)
+	proxyIndex := NewIndex()
+	proxyLimiter := NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	upstream := NewUpstream(badUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	// Pre-populate local cache
+	data := loadTestFixture(t, "root.json")
+	var env Envelope
+	json.Unmarshal(data, &env)
+	var item Item
+	json.Unmarshal(env.Item, &item)
+	ref := item.Ref()
+	ts, _ := item.Timestamp()
+	proxyStore.Write(ref, data, ts)
+	proxyIndex.Update(ref, &item, ts)
+
+	// GET through proxy — upstream returns 502, should fall back to cache
+	resp := doGet(t, proxySrv, "/"+ref)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 from cache fallback, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
+// TestProxyInbound502FallsBackToLocal verifies that when upstream returns 502
+// for an inbound query, the proxy falls back to the local index.
+func TestProxyInbound502FallsBackToLocal(t *testing.T) {
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer badUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := NewStore(proxyDir)
+	proxyIndex := NewIndex()
+	proxyLimiter := NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	upstream := NewUpstream(badUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	ref := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
+	resp := doGet(t, proxySrv, "/"+ref+"/inbound")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 from local fallback, got %d: %s", resp.StatusCode, body)
+	}
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	// Should return an empty list, not a 502
+	if list.Items == nil {
+		t.Error("expected items array (even if empty), got nil")
+	}
+}
