@@ -22,16 +22,16 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
 	}
-	http.Redirect(w, r, "/v1/objects/"+metas[0].Ref, http.StatusFound)
+	http.Redirect(w, r, "/"+metas[0].Ref, http.StatusFound)
 }
 
-// handleGetObject serves GET /v1/objects/{ref}
+// handleGetObject serves GET /{ref}
 func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
 	data, err := h.store.Read(ref)
 	if err != nil {
-		log.Printf("ERROR: GET /objects/%s: %v", ref, err)
+		log.Printf("ERROR: GET /%s: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
@@ -48,9 +48,9 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		var env Envelope
 		var item Item
 		if err := json.Unmarshal(data, &env); err != nil {
-			log.Printf("WARN: GET /objects/%s: failed to parse envelope for ETag: %v", ref, err)
+			log.Printf("WARN: GET /%s: failed to parse envelope for ETag: %v", ref, err)
 		} else if err := json.Unmarshal(env.Item, &item); err != nil {
-			log.Printf("WARN: GET /objects/%s: failed to parse item for ETag: %v", ref, err)
+			log.Printf("WARN: GET /%s: failed to parse item for ETag: %v", ref, err)
 		} else {
 			etag = `"` + strconv.Itoa(item.Revision) + `"`
 		}
@@ -87,7 +87,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-// handlePutObject serves PUT /v1/objects/{ref}
+// handlePutObject serves PUT /{ref}
 func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
@@ -144,7 +144,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Canonicalize for storage
 	canonical, err := canonicalJSON(body)
 	if err != nil {
-		log.Printf("ERROR: PUT /objects/%s: canonical JSON: %v", ref, err)
+		log.Printf("ERROR: PUT /%s: canonical JSON: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
@@ -157,7 +157,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Write to store
 	if err := h.store.Write(ref, canonical, ts); err != nil {
-		log.Printf("ERROR: PUT /objects/%s: write: %v", ref, err)
+		log.Printf("ERROR: PUT /%s: write: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
@@ -173,7 +173,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	w.Write(canonical)
 }
 
-// handleListObjects serves GET /v1/objects
+// handleListObjects serves GET /search
 func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	pubkey := q.Get("by")
@@ -192,7 +192,7 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items, nextCursor, hasMore)
 }
 
-// handleGetInbound serves GET /v1/objects/{ref}/inbound
+// handleGetInbound serves GET /{ref}/inbound
 func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	q := r.URL.Query()

@@ -52,7 +52,7 @@ func TestPutAndGetObject(t *testing.T) {
 	resp.Body.Close()
 
 	// GET
-	resp = doGet(t, ts, "/v1/objects/"+ref)
+	resp = doGet(t, ts, "/"+ref)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET expected 200, got %d", resp.StatusCode)
 	}
@@ -139,7 +139,7 @@ func TestGetNotFound(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()
 
-	resp := doGet(t, ts, "/v1/objects/nonexistent.00000000-0000-0000-0000-000000000000")
+	resp := doGet(t, ts, "/nonexistent.00000000-0000-0000-0000-000000000000")
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", resp.StatusCode)
 	}
@@ -167,7 +167,7 @@ func TestListObjects(t *testing.T) {
 	}
 
 	// List all
-	resp := doGet(t, ts, "/v1/objects")
+	resp := doGet(t, ts, "/search")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list expected 200, got %d", resp.StatusCode)
 	}
@@ -180,7 +180,7 @@ func TestListObjects(t *testing.T) {
 	}
 
 	// List by pubkey
-	resp = doGet(t, ts, "/v1/objects?by=AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ")
+	resp = doGet(t, ts, "/search?by=AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ")
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	if len(list.Items) != 3 {
@@ -188,7 +188,7 @@ func TestListObjects(t *testing.T) {
 	}
 
 	// List by type
-	resp = doGet(t, ts, "/v1/objects?type=ROOT")
+	resp = doGet(t, ts, "/search?type=ROOT")
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	if len(list.Items) != 1 {
@@ -213,7 +213,7 @@ func TestListPagination(t *testing.T) {
 	}
 
 	// Page with limit=2
-	resp := doGet(t, ts, "/v1/objects?limit=2")
+	resp := doGet(t, ts, "/search?limit=2")
 	var list ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -229,7 +229,7 @@ func TestListPagination(t *testing.T) {
 	}
 
 	// Page 2
-	resp = doGet(t, ts, "/v1/objects?limit=2&cursor="+*list.Cursor)
+	resp = doGet(t, ts, "/search?limit=2&cursor="+*list.Cursor)
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -250,7 +250,7 @@ func TestInboundRelations(t *testing.T) {
 
 	// The root object is referenced by identity (via "root" relation) and core_types (via "root" relation)
 	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
-	resp := doGet(t, ts, "/v1/objects/"+rootRef+"/inbound")
+	resp := doGet(t, ts, "/"+rootRef+"/inbound")
 	var list ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -261,7 +261,7 @@ func TestInboundRelations(t *testing.T) {
 	}
 
 	// Filter by relation type
-	resp = doGet(t, ts, "/v1/objects/"+rootRef+"/inbound?relation=root")
+	resp = doGet(t, ts, "/"+rootRef+"/inbound?relation=root")
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -335,7 +335,7 @@ func TestInboundCounts(t *testing.T) {
 	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
 
 	// List objects with include=inbound_counts
-	resp := doGet(t, ts, "/v1/objects?include=inbound_counts")
+	resp := doGet(t, ts, "/search?include=inbound_counts")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -380,7 +380,7 @@ func TestInboundCountsOnInbound(t *testing.T) {
 	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
 
 	// Get inbound to root with include=inbound_counts
-	resp := doGet(t, ts, "/v1/objects/"+rootRef+"/inbound?include=inbound_counts")
+	resp := doGet(t, ts, "/"+rootRef+"/inbound?include=inbound_counts")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -409,7 +409,7 @@ func TestNoInboundCountsWithoutParam(t *testing.T) {
 	putAllFixtures(t, ts)
 
 	// Without include=inbound_counts, items should NOT have the field
-	resp := doGet(t, ts, "/v1/objects")
+	resp := doGet(t, ts, "/search")
 	var list ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
@@ -442,7 +442,7 @@ func TestETagAndNotModified(t *testing.T) {
 	resp.Body.Close()
 
 	// GET without If-None-Match: should return 200 with ETag
-	resp = doGet(t, ts, "/v1/objects/"+ref)
+	resp = doGet(t, ts, "/"+ref)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET expected 200, got %d", resp.StatusCode)
 	}
@@ -457,7 +457,7 @@ func TestETagAndNotModified(t *testing.T) {
 	}
 
 	// GET with matching If-None-Match: should return 304 with no body
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+ref, nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+ref, nil)
 	req.Header.Set("If-None-Match", etag)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -473,7 +473,7 @@ func TestETagAndNotModified(t *testing.T) {
 	}
 
 	// GET with non-matching If-None-Match: should return 200
-	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+ref, nil)
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/"+ref, nil)
 	req.Header.Set("If-None-Match", `"999"`)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -489,7 +489,7 @@ func TestRateLimitHeaders(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()
 
-	resp := doGet(t, ts, "/v1/objects")
+	resp := doGet(t, ts, "/search")
 	if resp.Header.Get("X-RateLimit-Limit") == "" {
 		t.Error("expected X-RateLimit-Limit header")
 	}
@@ -536,7 +536,7 @@ func TestPageServedAsHTML(t *testing.T) {
 	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
 
 	// Browser request (Accept: text/html) should return HTML
-	resp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	resp := doGetWithAccept(t, ts, "/"+pageRef, "text/html")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -560,7 +560,7 @@ func TestPageServedAsJSONWithoutAcceptHTML(t *testing.T) {
 	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
 
 	// API request (no Accept or Accept: application/json) should return JSON
-	resp := doGet(t, ts, "/v1/objects/"+pageRef)
+	resp := doGet(t, ts, "/"+pageRef)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -583,7 +583,7 @@ func TestPageRelationRedirect(t *testing.T) {
 	appRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.bbbbbbbb-cccc-4ddd-eeee-ffffffffffff"
 
 	// Browser request for the app should serve the page's HTML
-	resp := doGetWithAccept(t, ts, "/v1/objects/"+appRef, "text/html")
+	resp := doGetWithAccept(t, ts, "/"+appRef, "text/html")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -608,7 +608,7 @@ func TestPageRelationJSONForAPI(t *testing.T) {
 	appRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.bbbbbbbb-cccc-4ddd-eeee-ffffffffffff"
 
 	// API request for the app should still return JSON
-	resp := doGetWithAccept(t, ts, "/v1/objects/"+appRef, "application/json")
+	resp := doGetWithAccept(t, ts, "/"+appRef, "application/json")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
@@ -630,7 +630,7 @@ func TestVaryHeaderPresent(t *testing.T) {
 
 	// Both HTML and JSON responses must include Vary: Accept
 	for _, accept := range []string{"text/html", "application/json"} {
-		resp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, accept)
+		resp := doGetWithAccept(t, ts, "/"+pageRef, accept)
 		vary := resp.Header.Get("Vary")
 		if vary != "Accept" {
 			t.Errorf("Accept=%q: expected Vary: Accept, got %q", accept, vary)
@@ -647,12 +647,12 @@ func TestETagDiffersByRepresentation(t *testing.T) {
 	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
 
 	// Get ETag for HTML representation
-	htmlResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	htmlResp := doGetWithAccept(t, ts, "/"+pageRef, "text/html")
 	htmlETag := htmlResp.Header.Get("ETag")
 	htmlResp.Body.Close()
 
 	// Get ETag for JSON representation
-	jsonResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "application/json")
+	jsonResp := doGetWithAccept(t, ts, "/"+pageRef, "application/json")
 	jsonETag := jsonResp.Header.Get("ETag")
 	jsonResp.Body.Close()
 
@@ -672,12 +672,12 @@ func TestETagNotModifiedRespectsRepresentation(t *testing.T) {
 	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
 
 	// Get the HTML ETag
-	htmlResp := doGetWithAccept(t, ts, "/v1/objects/"+pageRef, "text/html")
+	htmlResp := doGetWithAccept(t, ts, "/"+pageRef, "text/html")
 	htmlETag := htmlResp.Header.Get("ETag")
 	htmlResp.Body.Close()
 
 	// HTML ETag should produce 304 for HTML request
-	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+pageRef, nil)
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+pageRef, nil)
 	req.Header.Set("Accept", "text/html")
 	req.Header.Set("If-None-Match", htmlETag)
 	resp, _ := http.DefaultClient.Do(req)
@@ -687,7 +687,7 @@ func TestETagNotModifiedRespectsRepresentation(t *testing.T) {
 	resp.Body.Close()
 
 	// HTML ETag should NOT produce 304 for JSON request
-	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/v1/objects/"+pageRef, nil)
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+pageRef, nil)
 	req2.Header.Set("Accept", "application/json")
 	req2.Header.Set("If-None-Match", htmlETag)
 	resp2, _ := http.DefaultClient.Do(req2)
@@ -705,7 +705,7 @@ func TestPageMissingHTMLField(t *testing.T) {
 	putFixture(t, ts, "root.json")
 
 	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
-	resp := doGetWithAccept(t, ts, "/v1/objects/"+rootRef, "text/html")
+	resp := doGetWithAccept(t, ts, "/"+rootRef, "text/html")
 	// Should fall back to JSON since root is not a PAGE and has no page relation
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -721,7 +721,7 @@ func TestPageMissingHTMLField(t *testing.T) {
 
 func doPut(t *testing.T, ts *httptest.Server, ref string, body []byte) *http.Response {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPut, ts.URL+"/v1/objects/"+ref, bytes.NewReader(body))
+	req, err := http.NewRequest(http.MethodPut, ts.URL+"/"+ref, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}

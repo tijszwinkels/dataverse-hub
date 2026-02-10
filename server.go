@@ -30,13 +30,10 @@ func (h *Hub) Router() http.Handler {
 	r.Use(jsonContentType)
 
 	r.Get("/", h.handleRoot)
-
-	r.Route("/v1", func(r chi.Router) {
-		r.Get("/objects", h.handleListObjects)
-		r.Get("/objects/{ref}", h.handleGetObject)
-		r.Put("/objects/{ref}", h.handlePutObject)
-		r.Get("/objects/{ref}/inbound", h.handleGetInbound)
-	})
+	r.Get("/search", h.handleListObjects)
+	r.Get("/{ref}", h.handleGetObject)
+	r.Put("/{ref}", h.handlePutObject)
+	r.Get("/{ref}/inbound", h.handleGetInbound)
 
 	return r
 }
