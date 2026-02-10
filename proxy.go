@@ -188,6 +188,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
 		p.index.Update(ref, item, ts)
+		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 		w.WriteHeader(resp.StatusCode)
 		w.Write(canonical)
@@ -344,6 +345,7 @@ func (p *Proxy) cacheLocally(ref string, data []byte) {
 		return
 	}
 	p.index.Update(ref, item, ts)
+	log.Printf("[proxy] cached %s rev %d (%s)", ref, item.Revision, item.Type)
 }
 
 // readOrFetch reads an object from local store, falling back to an upstream
@@ -451,9 +453,9 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 	}
 
 	if acceptsHTML(r) {
-		html := p.resolvePageHTML(data)
+		html := p.resolvePageHTML(ref, data)
 		if html == "" && p.defaultViewerRef != "" && ref != p.defaultViewerRef {
-			html = p.resolveDefaultViewerHTML()
+			html = p.resolveDefaultViewerHTML(ref)
 		}
 		if html != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -461,6 +463,7 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 			io.WriteString(w, html)
 			return
 		}
+		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -468,13 +471,15 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 }
 
 // resolvePageHTML extracts HTML from a PAGE object or follows a page relation.
-func (p *Proxy) resolvePageHTML(data []byte) string {
+// reqRef is the originally requested ref (for logging).
+func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	_, item, err := ParseEnvelope(data)
 	if err != nil {
 		return ""
 	}
 
 	if item.Type == "PAGE" {
+		log.Printf("[proxy] GET /%s: serving inline PAGE HTML", reqRef)
 		return extractHTML(item)
 	}
 
@@ -487,23 +492,35 @@ func (p *Proxy) resolvePageHTML(data []byte) string {
 		return ""
 	}
 	pageData, err := p.readOrFetch(rel.Ref)
-	if err != nil || pageData == nil {
+	if err != nil {
+		log.Printf("[proxy] GET /%s: page relation %s fetch failed: %v", reqRef, rel.Ref, err)
+		return ""
+	}
+	if pageData == nil {
 		return ""
 	}
 	_, pageItem, err := ParseEnvelope(pageData)
 	if err != nil || pageItem.Type != "PAGE" {
 		return ""
 	}
+	log.Printf("[proxy] GET /%s: serving HTML via page relation %s", reqRef, rel.Ref)
 	return extractHTML(pageItem)
 }
 
 // resolveDefaultViewerHTML loads the default viewer PAGE HTML.
-func (p *Proxy) resolveDefaultViewerHTML() string {
+// reqRef is the originally requested ref (for logging).
+func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 	data, err := p.readOrFetch(p.defaultViewerRef)
-	if err != nil || data == nil {
+	if err != nil {
+		log.Printf("[proxy] GET /%s: default viewer %s fetch failed: %v", reqRef, p.defaultViewerRef, err)
 		return ""
 	}
-	return p.resolvePageHTML(data)
+	if data == nil {
+		return ""
+	}
+	// resolvePageHTML logs which PAGE it found; we just log that we're using the default viewer
+	log.Printf("[proxy] GET /%s: trying default viewer %s", reqRef, p.defaultViewerRef)
+	return p.resolvePageHTML(reqRef, data)
 }
 
 // storeLocallyWithPending stores an object locally and adds to sync pending.
@@ -537,6 +554,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		return
 	}
 	p.index.Update(ref, item, ts)
+	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending
 	w.WriteHeader(http.StatusAccepted)

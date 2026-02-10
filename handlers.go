@@ -183,6 +183,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Update index
 	h.index.Update(ref, item, ts)
+	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 	if isUpdate {
 		w.WriteHeader(http.StatusOK)
