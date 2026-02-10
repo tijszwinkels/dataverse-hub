@@ -46,10 +46,12 @@ type RelationRef struct {
 
 // ObjectMeta is stored in the index to avoid re-reading files for filtering.
 type ObjectMeta struct {
-	Ref       string
-	Pubkey    string
-	Type      string
-	UpdatedAt time.Time
+	Ref             string
+	Pubkey          string
+	Type            string
+	Revision        int
+	HasPageRelation bool // true if item has a "page" relation
+	UpdatedAt       time.Time
 }
 
 // RelationEntry maps a target ref back to the source that references it.

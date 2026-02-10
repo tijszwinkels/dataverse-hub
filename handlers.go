@@ -29,6 +29,52 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
+	// Fast path: use index to build ETag and check 304 without disk I/O
+	meta, found := h.index.GetMeta(ref)
+	if !found {
+		// Not in index — check disk (race condition or index lag)
+		data, err := h.store.Read(ref)
+		if err != nil {
+			log.Printf("ERROR: GET /%s: %v", ref, err)
+			writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+			return
+		}
+		if data == nil {
+			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			return
+		}
+		// Serve directly (rare fallback)
+		h.serveObject(w, r, ref, data)
+		return
+	}
+
+	// Build ETag from indexed revision
+	etag := `"` + strconv.Itoa(meta.Revision) + `"`
+
+	// Determine representation from index data (no disk I/O)
+	isHTML := false
+	if acceptsHTML(r) {
+		if meta.Type == "PAGE" || meta.HasPageRelation {
+			isHTML = true
+		} else if h.defaultViewerRef != "" && ref != h.defaultViewerRef {
+			isHTML = true
+		}
+	}
+
+	if isHTML {
+		etag = etag[:len(etag)-1] + `-html"`
+	}
+
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("ETag", etag)
+
+	// 304 Not Modified — zero disk I/O
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	// Cache miss — read file for the response body
 	data, err := h.store.Read(ref)
 	if err != nil {
 		log.Printf("ERROR: GET /%s: %v", ref, err)
@@ -40,54 +86,23 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ETag = revision number (objects are immutable at a given revision)
-	meta, _ := h.index.GetMeta(ref)
-	etag := `"0"`
-	if meta.Ref != "" {
-		// Parse revision from stored data to get exact value
-		var env Envelope
-		var item Item
-		if err := json.Unmarshal(data, &env); err != nil {
-			log.Printf("WARN: GET /%s: failed to parse envelope for ETag: %v", ref, err)
-		} else if err := json.Unmarshal(env.Item, &item); err != nil {
-			log.Printf("WARN: GET /%s: failed to parse item for ETag: %v", ref, err)
-		} else {
-			etag = `"` + strconv.Itoa(item.Revision) + `"`
-		}
-	}
-	// Response varies by Accept header (HTML vs JSON)
-	w.Header().Set("Vary", "Accept")
+	h.serveObject(w, r, ref, data)
+}
 
-	// Determine what we're serving before setting ETag/304
-	var html string
-	isHTML := false
+// serveObject writes the response body for a GET that isn't 304.
+// ETag/Vary headers must already be set by the caller.
+func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
 	if acceptsHTML(r) {
-		html = h.resolvePageHTML(data)
-		if html != "" {
-			isHTML = true
-		} else if h.defaultViewerRef != "" && ref != h.defaultViewerRef {
+		html := h.resolvePageHTML(data)
+		if html == "" && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
 			html = h.resolveDefaultViewerHTML()
-			isHTML = html != ""
 		}
-	}
-
-	// ETag includes representation suffix so HTML and JSON are cached separately
-	if isHTML {
-		etag = etag[:len(etag)-1] + `-html"`
-	}
-	w.Header().Set("ETag", etag)
-
-	// 304 Not Modified if client has this revision+representation
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	if isHTML {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, html)
-		return
+		if html != "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, html)
+			return
+		}
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -136,16 +151,13 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check existing revision
-	existing, _ := h.store.Read(ref)
-	if existing != nil {
-		_, existingItem, err := ParseEnvelope(existing)
-		if err == nil && existingItem.Revision >= item.Revision {
-			writeError(w, http.StatusConflict,
-				fmt.Sprintf("existing revision %d >= incoming %d", existingItem.Revision, item.Revision),
-				"REVISION_CONFLICT")
-			return
-		}
+	// Check existing revision via index (no disk I/O)
+	existingMeta, isUpdate := h.index.GetMeta(ref)
+	if isUpdate && existingMeta.Revision >= item.Revision {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
+			"REVISION_CONFLICT")
+		return
 	}
 
 	// Canonicalize for storage
@@ -172,7 +184,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Update index
 	h.index.Update(ref, item, ts)
 
-	if existing != nil {
+	if isUpdate {
 		w.WriteHeader(http.StatusOK)
 	} else {
 		w.WriteHeader(http.StatusCreated)

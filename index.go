@@ -197,10 +197,12 @@ func (idx *Index) GetInboundCounts(targetRef string) map[string]int {
 func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 	// Meta
 	idx.meta[ref] = ObjectMeta{
-		Ref:       ref,
-		Pubkey:    item.Pubkey,
-		Type:      item.Type,
-		UpdatedAt: ts,
+		Ref:             ref,
+		Pubkey:          item.Pubkey,
+		Type:            item.Type,
+		Revision:        item.Revision,
+		HasPageRelation: len(item.Relations["page"]) > 0,
+		UpdatedAt:       ts,
 	}
 
 	// byPubkey
