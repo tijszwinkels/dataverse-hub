@@ -83,6 +83,16 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fallback: serve default object viewer for browser requests
+	if acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
+		if viewerHTML := h.resolveDefaultViewerHTML(); viewerHTML != "" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, viewerHTML)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
@@ -335,6 +345,16 @@ func (h *Hub) resolvePageHTML(data []byte) string {
 		return ""
 	}
 	return extractHTML(pageItem)
+}
+
+// resolveDefaultViewerHTML loads and caches the default viewer PAGE's HTML.
+func (h *Hub) resolveDefaultViewerHTML() string {
+	data, err := h.store.Read(h.defaultViewerRef)
+	if err != nil || data == nil {
+		log.Printf("WARN: default viewer %s not found: %v", h.defaultViewerRef, err)
+		return ""
+	}
+	return h.resolvePageHTML(data)
 }
 
 // extractHTML pulls the html string from item.content.html.

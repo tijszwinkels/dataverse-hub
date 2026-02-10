@@ -9,14 +9,15 @@ import (
 
 // Hub ties together the store, index, and rate limiter.
 type Hub struct {
-	store   *Store
-	index   *Index
-	limiter *RateLimiter
+	store            *Store
+	index            *Index
+	limiter          *RateLimiter
+	defaultViewerRef string
 }
 
 // NewHub creates a Hub with the given components.
-func NewHub(store *Store, index *Index, limiter *RateLimiter) *Hub {
-	return &Hub{store: store, index: index, limiter: limiter}
+func NewHub(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef string) *Hub {
+	return &Hub{store: store, index: index, limiter: limiter, defaultViewerRef: defaultViewerRef}
 }
 
 // Router returns the chi router with all routes and middleware.

@@ -14,7 +14,7 @@ import (
 func main() {
 	cfg := loadConfig()
 
-	log.Printf("Starting dataverse hub on %s (store: %s)", cfg.Addr, cfg.StoreDir)
+	log.Printf("Starting dataverse hub on %s (store: %s, viewer: %s)", cfg.Addr, cfg.StoreDir, cfg.DefaultViewerRef)
 
 	store, err := NewStore(cfg.StoreDir)
 	if err != nil {
@@ -31,7 +31,7 @@ func main() {
 	limiter := NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
-	hub := NewHub(store, index, limiter)
+	hub := NewHub(store, index, limiter, cfg.DefaultViewerRef)
 	srv := &http.Server{
 		Addr:         cfg.Addr,
 		Handler:      hub.Router(),
@@ -65,10 +65,11 @@ func main() {
 
 func loadConfig() Config {
 	return Config{
-		Addr:            envOr("HUB_ADDR", ":8080"),
-		StoreDir:        envOr("HUB_STORE_DIR", "./dataverse001"),
-		RateLimitPerMin: envOrInt("HUB_RATE_LIMIT_PER_MIN", 60),
-		RateLimitPerDay: envOrInt("HUB_RATE_LIMIT_PER_DAY", 10000),
+		Addr:             envOr("HUB_ADDR", ":8080"),
+		StoreDir:         envOr("HUB_STORE_DIR", "./dataverse001"),
+		RateLimitPerMin:  envOrInt("HUB_RATE_LIMIT_PER_MIN", 60),
+		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 10000),
+		DefaultViewerRef: envOr("HUB_DEFAULT_VIEWER_REF", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"),
 	}
 }
 

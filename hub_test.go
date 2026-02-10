@@ -23,7 +23,7 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 
 	index := NewIndex()
 	limiter := NewRateLimiter(1000, 100000) // generous limits for tests
-	hub := NewHub(store, index, limiter)
+	hub := NewHub(store, index, limiter, "")
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, func() {

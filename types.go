@@ -79,8 +79,9 @@ type APIError struct {
 
 // Config holds server configuration.
 type Config struct {
-	Addr            string
-	StoreDir        string
-	RateLimitPerMin int
-	RateLimitPerDay int
+	Addr              string
+	StoreDir          string
+	RateLimitPerMin   int
+	RateLimitPerDay   int
+	DefaultViewerRef  string // PAGE ref to use as default object viewer for browsers
 }
