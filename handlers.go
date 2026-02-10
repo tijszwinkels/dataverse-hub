@@ -55,17 +55,24 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			etag = `"` + strconv.Itoa(item.Revision) + `"`
 		}
 	}
-	// Response varies by Accept header (HTML vs JSON for PAGE objects)
+	// Response varies by Accept header (HTML vs JSON)
 	w.Header().Set("Vary", "Accept")
 
-	// Resolve HTML representation before setting ETag
+	// Determine what we're serving before setting ETag/304
 	var html string
+	isHTML := false
 	if acceptsHTML(r) {
 		html = h.resolvePageHTML(data)
+		if html != "" {
+			isHTML = true
+		} else if h.defaultViewerRef != "" && ref != h.defaultViewerRef {
+			html = h.resolveDefaultViewerHTML()
+			isHTML = html != ""
+		}
 	}
 
 	// ETag includes representation suffix so HTML and JSON are cached separately
-	if html != "" {
+	if isHTML {
 		etag = etag[:len(etag)-1] + `-html"`
 	}
 	w.Header().Set("ETag", etag)
@@ -76,21 +83,11 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if html != "" {
+	if isHTML {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, html)
 		return
-	}
-
-	// Fallback: serve default object viewer for browser requests
-	if acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
-		if viewerHTML := h.resolveDefaultViewerHTML(); viewerHTML != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, viewerHTML)
-			return
-		}
 	}
 
 	w.WriteHeader(http.StatusOK)
