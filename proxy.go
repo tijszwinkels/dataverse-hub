@@ -109,7 +109,15 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		p.serveObjectData(w, r, ref, body)
 
 	case http.StatusNotFound:
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		// Upstream doesn't have it — serve from local if we do, and push it
+		localData, _ := p.store.Read(ref)
+		if localData == nil {
+			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			return
+		}
+		log.Printf("[proxy] GET /%s: upstream 404 but found locally, serving + pushing", ref)
+		go p.pushToUpstream(ref, localData)
+		p.serveFromLocalCache(w, r, ref, clientETag)
 
 	default:
 		if isUpstreamDown(resp.StatusCode) {
@@ -205,8 +213,16 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(resp.StatusCode)
 		w.Write(canonical)
 
+	case http.StatusConflict:
+		// Upstream has newer revision — fetch and cache it
+		log.Printf("[proxy] PUT /%s: upstream conflict, fetching newer version", ref)
+		go p.fetchAndCacheFromUpstream(ref)
+		respBody, _ := io.ReadAll(resp.Body)
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
+
 	default:
-		// Forward upstream error (409, 400, etc.)
+		// Forward upstream error (400, etc.)
 		respBody, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
@@ -352,14 +368,27 @@ func (p *Proxy) enrichWithInboundCounts(items []json.RawMessage, refs []string) 
 }
 
 // cacheLocally stores an object in the local store and updates the index.
+// Refuses to downgrade: if local has a newer revision, pushes local to upstream instead.
 func (p *Proxy) cacheLocally(ref string, data []byte) {
 	_, item, err := ParseEnvelope(data)
 	if err != nil {
 		log.Printf("[proxy] WARN: cache %s: parse: %v", ref, err)
 		return
 	}
-	// Backup old version before caching newer one
-	if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate && existingMeta.Revision < item.Revision {
+
+	if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
+		if existingMeta.Revision > item.Revision {
+			// Local is newer — push local to upstream instead of downgrading
+			log.Printf("[proxy] cache %s: local rev %d > upstream rev %d, pushing local", ref, existingMeta.Revision, item.Revision)
+			if localData, err := p.store.Read(ref); err == nil && localData != nil {
+				go p.pushToUpstream(ref, localData)
+			}
+			return
+		}
+		if existingMeta.Revision == item.Revision {
+			return // same revision, nothing to do
+		}
+		// Incoming is newer — backup old before overwriting
 		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
 			log.Printf("[proxy] WARN: cache %s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
 		}
@@ -595,6 +624,60 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		"status": "pending_sync",
 		"ref":    ref,
 	})
+}
+
+// pushToUpstream PUTs a local object to upstream (fire-and-forget).
+// Used when we discover upstream is missing an object we have locally.
+func (p *Proxy) pushToUpstream(ref string, data []byte) {
+	req, err := http.NewRequest(http.MethodPut, p.upstream.baseURL+"/"+ref, nil)
+	if err != nil {
+		log.Printf("[proxy] WARN: push %s: build request: %v", ref, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.upstream.Do(req, data)
+	if err != nil {
+		log.Printf("[proxy] WARN: push %s: upstream unreachable: %v", ref, err)
+		return
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		log.Printf("[proxy] pushed %s to upstream (%d)", ref, resp.StatusCode)
+	} else {
+		log.Printf("[proxy] WARN: push %s: upstream returned %d", ref, resp.StatusCode)
+	}
+}
+
+// fetchAndCacheFromUpstream GETs an object from upstream and caches it locally.
+// Used after a PUT 409 conflict to get the newer version.
+func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
+	req, err := http.NewRequest(http.MethodGet, p.upstream.baseURL+"/"+ref, nil)
+	if err != nil {
+		log.Printf("[proxy] WARN: fetch-after-conflict %s: build request: %v", ref, err)
+		return
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := p.upstream.Do(req, nil)
+	if err != nil {
+		log.Printf("[proxy] WARN: fetch-after-conflict %s: %v", ref, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("[proxy] WARN: fetch-after-conflict %s: read body: %v", ref, err)
+		return
+	}
+	p.cacheLocally(ref, body)
 }
 
 // isUpstreamDown returns true for HTTP status codes that indicate the upstream
