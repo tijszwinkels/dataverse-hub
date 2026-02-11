@@ -93,12 +93,12 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	// Phase 1: Sync main object with upstream
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		p.serveFromLocalCache(w, r, ref, clientETag)
+		// local cache is current
 
 	case http.StatusOK:
-		// Upstream has data — cache locally and serve
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("[proxy] ERROR: GET /%s: read upstream body: %v", ref, err)
@@ -106,10 +106,8 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p.cacheLocally(ref, body)
-		p.serveObjectData(w, r, ref, body)
 
 	case http.StatusNotFound:
-		// Upstream doesn't have it — serve from local if we do, and push it
 		localData, _ := p.store.Read(ref)
 		if localData == nil {
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
@@ -117,7 +115,6 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[proxy] GET /%s: upstream 404 but found locally, serving + pushing", ref)
 		go p.pushToUpstream(ref, localData)
-		p.serveFromLocalCache(w, r, ref, clientETag)
 
 	default:
 		if isUpstreamDown(resp.StatusCode) {
@@ -130,7 +127,16 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
+		return
 	}
+
+	// Phase 2: Sync page dependencies (if serving HTML)
+	if acceptsHTML(r) {
+		p.ensurePageDepsFresh(ref)
+	}
+
+	// Phase 3: Serve from local cache (no more upstream calls)
+	p.serveFromLocalCache(w, r, ref, clientETag)
 }
 
 // handlePutObject proxies PUT /{ref} with local signature verification.
@@ -403,36 +409,76 @@ func (p *Proxy) cacheLocally(ref string, data []byte) {
 	log.Printf("[proxy] cached %s rev %d (%s)", ref, item.Revision, item.Type)
 }
 
-// readOrFetch reads an object from local store, falling back to an upstream
-// fetch (and local cache) if not found locally.
-func (p *Proxy) readOrFetch(ref string) ([]byte, error) {
-	data, err := p.store.Read(ref)
-	if err == nil && data != nil {
-		return data, nil
-	}
+// ensureFresh checks upstream for a newer version of ref and updates local cache.
+// On failure, local cache is left as-is (best effort).
+func (p *Proxy) ensureFresh(ref string) {
+	upstreamETag := p.buildUpstreamETag(ref)
 
 	req, err := http.NewRequest(http.MethodGet, p.upstream.baseURL+"/"+ref, nil)
 	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
+		return
 	}
 	req.Header.Set("Accept", "application/json")
+	if upstreamETag != "" {
+		req.Header.Set("If-None-Match", upstreamETag)
+	}
 
 	resp, err := p.upstream.Do(req, nil)
 	if err != nil {
-		return nil, fmt.Errorf("upstream unreachable: %w", err)
+		return
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream returned %d", resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		// already fresh
+	case http.StatusOK:
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return
+		}
+		p.cacheLocally(ref, body)
+	case http.StatusNotFound:
+		if data, err := p.store.Read(ref); err == nil && data != nil {
+			go p.pushToUpstream(ref, data)
+		}
+	default:
+		io.Copy(io.Discard, resp.Body)
+	}
+}
+
+// ensurePageDepsFresh syncs the page-related objects that may be needed for
+// HTML rendering. Must be called BEFORE the serve phase.
+func (p *Proxy) ensurePageDepsFresh(ref string) {
+	data, err := p.store.Read(ref)
+	if err != nil || data == nil {
+		return
+	}
+	_, item, err := ParseEnvelope(data)
+	if err != nil {
+		return
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
+	// Object is itself a PAGE — HTML is inline, nothing to sync
+	if item.Type == "PAGE" {
+		return
 	}
-	p.cacheLocally(ref, body)
-	return body, nil
+
+	// Has a page relation — sync that ref
+	if pageRels, ok := item.Relations["page"]; ok && len(pageRels) > 0 {
+		var rel RelationRef
+		if json.Unmarshal(pageRels[0], &rel) == nil && rel.Ref != "" {
+			p.ensureFresh(rel.Ref)
+			return
+		}
+	}
+
+	// No page relation — try default viewer
+	if p.defaultViewerRef != "" && ref != p.defaultViewerRef {
+		p.ensureFresh(p.defaultViewerRef)
+		// Default viewer may itself have a page relation
+		p.ensurePageDepsFresh(p.defaultViewerRef)
+	}
 }
 
 // --- internal helpers ---
@@ -526,7 +572,7 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 }
 
 // resolvePageHTML extracts HTML from a PAGE object or follows a page relation.
-// reqRef is the originally requested ref (for logging).
+// Only reads from local store — all upstream syncing must be done beforehand.
 func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	_, item, err := ParseEnvelope(data)
 	if err != nil {
@@ -546,12 +592,9 @@ func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
 		return ""
 	}
-	pageData, err := p.readOrFetch(rel.Ref)
-	if err != nil {
-		log.Printf("[proxy] GET /%s: page relation %s fetch failed: %v", reqRef, rel.Ref, err)
-		return ""
-	}
-	if pageData == nil {
+	pageData, err := p.store.Read(rel.Ref)
+	if err != nil || pageData == nil {
+		log.Printf("[proxy] GET /%s: page relation %s not in local store", reqRef, rel.Ref)
 		return ""
 	}
 	_, pageItem, err := ParseEnvelope(pageData)
@@ -562,18 +605,13 @@ func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	return extractHTML(pageItem)
 }
 
-// resolveDefaultViewerHTML loads the default viewer PAGE HTML.
-// reqRef is the originally requested ref (for logging).
+// resolveDefaultViewerHTML loads the default viewer PAGE HTML from local store.
 func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
-	data, err := p.readOrFetch(p.defaultViewerRef)
-	if err != nil {
-		log.Printf("[proxy] GET /%s: default viewer %s fetch failed: %v", reqRef, p.defaultViewerRef, err)
+	data, err := p.store.Read(p.defaultViewerRef)
+	if err != nil || data == nil {
+		log.Printf("[proxy] GET /%s: default viewer %s not in local store", reqRef, p.defaultViewerRef)
 		return ""
 	}
-	if data == nil {
-		return ""
-	}
-	// resolvePageHTML logs which PAGE it found; we just log that we're using the default viewer
 	log.Printf("[proxy] GET /%s: trying default viewer %s", reqRef, p.defaultViewerRef)
 	return p.resolvePageHTML(reqRef, data)
 }

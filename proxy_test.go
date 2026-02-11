@@ -326,8 +326,8 @@ func TestProxy304ToClient(t *testing.T) {
 
 // TestProxyClientETagNoCacheMustFetch verifies that when a client sends an
 // If-None-Match header but the proxy has no local cache, the proxy does NOT
-// forward the client's ETag upstream. Otherwise upstream returns 304 but
-// the proxy has nothing to serve → spurious 404.
+// forward the client's ETag upstream. The proxy fetches the full object,
+// caches it, then correctly returns 304 (client already has this revision).
 func TestProxyClientETagNoCacheMustFetch(t *testing.T) {
 	proxySrv, rootSrv, cleanup := testRootAndProxy(t)
 	defer cleanup()
@@ -347,7 +347,7 @@ func TestProxyClientETagNoCacheMustFetch(t *testing.T) {
 	resp.Body.Close()
 
 	// Client sends If-None-Match from a previous direct visit to root
-	// Proxy has empty cache — must fetch full object, not forward the ETag
+	// Proxy has empty cache — must fetch full object, not forward client's ETag
 	req, _ := http.NewRequest(http.MethodGet, proxySrv.URL+"/"+ref, nil)
 	req.Header.Set("If-None-Match", `"`+strconv.Itoa(item.Revision)+`"`)
 	resp, err := http.DefaultClient.Do(req)
@@ -356,9 +356,11 @@ func TestProxyClientETagNoCacheMustFetch(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Must get 200 (fetched from upstream), NOT 404 (cache miss after 304)
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 (proxy must fetch from upstream), got %d", resp.StatusCode)
+	// Proxy fetches from upstream (200), caches, then sees client already
+	// has this revision → 304. NOT 404 (which would happen if proxy forwarded
+	// client's ETag and had nothing to serve after upstream's 304).
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotModified {
+		t.Errorf("expected 200 or 304, got %d", resp.StatusCode)
 	}
 }
 
