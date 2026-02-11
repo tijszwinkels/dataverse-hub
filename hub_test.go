@@ -896,6 +896,31 @@ func TestBlobServedAsBinaryForBrowser(t *testing.T) {
 	}
 }
 
+func TestBlobServedAsBinaryForSafari(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Safari doesn't list specific image types — only has */* wildcard.
+	// BLOB should still win over the default viewer via */* match.
+	safariAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+	resp := doGetWithAccept(t, ts, "/"+blobRef, safariAccept)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "image/png" {
+		t.Errorf("expected image/png (blob via */* match), got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
+		t.Errorf("expected raw PNG bytes, got %d bytes", len(body))
+	}
+}
+
 func TestBlobStrippedFromListResponse(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()

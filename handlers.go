@@ -344,7 +344,8 @@ func acceptsHTML(r *http.Request) bool {
 }
 
 // acceptsMimeType returns true if the request Accept header matches the given
-// MIME type exactly or via a wildcard subtype (e.g. image/* matches image/png).
+// MIME type exactly, via a wildcard subtype (e.g. image/* matches image/png),
+// or via */* (client accepts anything — serve the BLOB's native content).
 func acceptsMimeType(r *http.Request, mimeType string) bool {
 	if mimeType == "" {
 		return false
@@ -356,7 +357,7 @@ func acceptsMimeType(r *http.Request, mimeType string) bool {
 	wildcard := mainType + "/*"
 	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
 		mt := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
-		if mt == mimeType || mt == wildcard {
+		if mt == mimeType || mt == wildcard || mt == "*/*" {
 			return true
 		}
 	}
