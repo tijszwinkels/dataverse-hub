@@ -13,7 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-const maxBodySize = 1 << 20 // 1 MB
+const maxBodySize = 10 << 20 // 10 MB
 
 // handleRoot serves GET / — redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
@@ -60,9 +60,15 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			isHTML = true
 		}
 	}
+	isBlob := false
+	if !isHTML && meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+		isBlob = true
+	}
 
 	if isHTML {
 		etag = etag[:len(etag)-1] + `-html"`
+	} else if isBlob {
+		etag = etag[:len(etag)-1] + `-blob"`
 	}
 
 	w.Header().Set("Vary", "Accept")
@@ -105,6 +111,10 @@ func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, da
 		}
 	}
 
+	if serveBlob(w, r, data) {
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
@@ -119,7 +129,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) > maxBodySize {
-		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 1MB)", "INVALID_OBJECT")
+		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
 		return
 	}
 
@@ -272,7 +282,11 @@ func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]
 			log.Printf("WARN: paginate skip %s: read error or missing", m.Ref)
 			continue
 		}
-		items = append(items, json.RawMessage(data))
+		item := json.RawMessage(data)
+		if m.Type == "BLOB" {
+			item = stripBlobData(item)
+		}
+		items = append(items, item)
 		refs = append(refs, m.Ref)
 	}
 
@@ -321,6 +335,94 @@ func acceptsHTML(r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// acceptsMimeType returns true if the request Accept header matches the given
+// MIME type exactly or via a wildcard subtype (e.g. image/* matches image/png).
+func acceptsMimeType(r *http.Request, mimeType string) bool {
+	if mimeType == "" {
+		return false
+	}
+	mainType, _, ok := strings.Cut(mimeType, "/")
+	if !ok {
+		return false
+	}
+	wildcard := mainType + "/*"
+	for _, part := range strings.Split(r.Header.Get("Accept"), ",") {
+		mt := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		if mt == mimeType || mt == wildcard {
+			return true
+		}
+	}
+	return false
+}
+
+// serveBlob checks if data is a BLOB object whose mime_type matches the
+// request's Accept header. If so, it decodes content.data and writes raw
+// bytes with the correct Content-Type and cache headers. Returns true if
+// it handled the response.
+func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
+	_, item, err := ParseEnvelope(data)
+	if err != nil || item.Type != "BLOB" || item.Content == nil {
+		return false
+	}
+
+	var content struct {
+		MimeType string `json:"mime_type"`
+		Data     string `json:"data"`
+		Size     int    `json:"size"`
+	}
+	if err := json.Unmarshal(item.Content, &content); err != nil || content.MimeType == "" || content.Data == "" {
+		return false
+	}
+
+	if !acceptsMimeType(r, content.MimeType) {
+		return false
+	}
+
+	raw, err := base64.StdEncoding.DecodeString(content.Data)
+	if err != nil {
+		log.Printf("WARN: serveBlob %s: base64 decode: %v", item.Ref(), err)
+		return false
+	}
+
+	w.Header().Set("Content-Type", content.MimeType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	w.WriteHeader(http.StatusOK)
+	w.Write(raw)
+	return true
+}
+
+// stripBlobData removes the content.data field from a BLOB object's JSON
+// representation, keeping all other fields (mime_type, size, sha256, filename).
+// Used in list responses to avoid sending large payloads.
+func stripBlobData(data json.RawMessage) json.RawMessage {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(data, &obj) != nil {
+		return data
+	}
+	itemRaw, ok := obj["item"]
+	if !ok {
+		return data
+	}
+	var item map[string]json.RawMessage
+	if json.Unmarshal(itemRaw, &item) != nil {
+		return data
+	}
+	contentRaw, ok := item["content"]
+	if !ok {
+		return data
+	}
+	var content map[string]json.RawMessage
+	if json.Unmarshal(contentRaw, &content) != nil {
+		return data
+	}
+	delete(content, "data")
+	item["content"], _ = json.Marshal(content)
+	obj["item"], _ = json.Marshal(item)
+	result, _ := json.Marshal(obj)
+	return result
 }
 
 // resolvePageHTML extracts HTML content from a PAGE object, or follows a `page`

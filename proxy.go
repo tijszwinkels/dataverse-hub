@@ -149,7 +149,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(body) > maxBodySize {
-		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 1MB)", "INVALID_OBJECT")
+		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
 		return
 	}
 
@@ -339,7 +339,11 @@ func (p *Proxy) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) (
 		if err != nil || data == nil {
 			continue
 		}
-		items = append(items, json.RawMessage(data))
+		item := json.RawMessage(data)
+		if m.Type == "BLOB" {
+			item = stripBlobData(item)
+		}
+		items = append(items, item)
 		refs = append(refs, m.Ref)
 	}
 
@@ -518,8 +522,14 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 			isHTML = true
 		}
 	}
+	isBlob := false
+	if !isHTML && meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+		isBlob = true
+	}
 	if isHTML {
 		etag = etag[:len(etag)-1] + `-html"`
+	} else if isBlob {
+		etag = etag[:len(etag)-1] + `-blob"`
 	}
 
 	w.Header().Set("Vary", "Accept")
@@ -565,6 +575,10 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 			return
 		}
 		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
+	}
+
+	if serveBlob(w, r, data) {
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)

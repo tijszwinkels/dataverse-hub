@@ -51,6 +51,7 @@ type ObjectMeta struct {
 	Type            string
 	Revision        int
 	HasPageRelation bool // true if item has a "page" relation
+	MimeType        string // content.mime_type for BLOB objects (used for content negotiation)
 	UpdatedAt       time.Time
 }
 

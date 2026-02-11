@@ -195,6 +195,16 @@ func (idx *Index) GetInboundCounts(targetRef string) map[string]int {
 
 // addLocked adds to all index maps. Caller must hold write lock.
 func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
+	// Extract mime_type for BLOB objects (used for content negotiation)
+	var mimeType string
+	if item.Type == "BLOB" && item.Content != nil {
+		var content struct {
+			MimeType string `json:"mime_type"`
+		}
+		json.Unmarshal(item.Content, &content)
+		mimeType = content.MimeType
+	}
+
 	// Meta
 	idx.meta[ref] = ObjectMeta{
 		Ref:             ref,
@@ -202,6 +212,7 @@ func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 		Type:            item.Type,
 		Revision:        item.Revision,
 		HasPageRelation: len(item.Relations["page"]) > 0,
+		MimeType:        mimeType,
 		UpdatedAt:       ts,
 	}
 

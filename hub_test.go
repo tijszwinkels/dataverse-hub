@@ -717,6 +717,229 @@ func TestPageMissingHTMLField(t *testing.T) {
 	resp.Body.Close()
 }
 
+// --- BLOB content negotiation tests ---
+
+const blobRef = "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.dddddddd-eeee-4fff-aaaa-bbbbbbbbbbbb"
+
+func TestBlobServedAsRawBytes(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Request with Accept: image/png should return raw PNG bytes
+	resp := doGetWithAccept(t, ts, "/"+blobRef, "image/png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "image/png" {
+		t.Errorf("expected image/png content-type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Should start with PNG magic bytes
+	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
+		t.Errorf("expected PNG bytes, got %d bytes starting with %x", len(body), body[:min(4, len(body))])
+	}
+	if resp.Header.Get("Content-Length") != "69" {
+		t.Errorf("expected Content-Length 69, got %q", resp.Header.Get("Content-Length"))
+	}
+}
+
+func TestBlobServedAsRawBytesWildcard(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Request with Accept: image/* should also match image/png
+	resp := doGetWithAccept(t, ts, "/"+blobRef, "image/*")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "image/png" {
+		t.Errorf("expected image/png content-type, got %q", ct)
+	}
+	resp.Body.Close()
+}
+
+func TestBlobServedAsJSONForAPI(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Request with Accept: application/json should return JSON envelope
+	resp := doGetWithAccept(t, ts, "/"+blobRef, "application/json")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var env Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected valid JSON envelope, got: %s", body)
+	}
+
+	// JSON should include content.data (full blob)
+	var item Item
+	json.Unmarshal(env.Item, &item)
+	var content struct {
+		Data string `json:"data"`
+	}
+	json.Unmarshal(item.Content, &content)
+	if content.Data == "" {
+		t.Error("expected content.data in JSON response")
+	}
+}
+
+func TestBlobCacheHeaders(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	resp := doGetWithAccept(t, ts, "/"+blobRef, "image/png")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	cc := resp.Header.Get("Cache-Control")
+	if cc == "" {
+		t.Error("expected Cache-Control header on blob response")
+	}
+	resp.Body.Close()
+}
+
+func TestBlobETagDiffersByRepresentation(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Get ETag for blob representation
+	blobResp := doGetWithAccept(t, ts, "/"+blobRef, "image/png")
+	blobETag := blobResp.Header.Get("ETag")
+	blobResp.Body.Close()
+
+	// Get ETag for JSON representation
+	jsonResp := doGetWithAccept(t, ts, "/"+blobRef, "application/json")
+	jsonETag := jsonResp.Header.Get("ETag")
+	jsonResp.Body.Close()
+
+	if blobETag == jsonETag {
+		t.Errorf("blob and JSON ETags must differ, both are %q", blobETag)
+	}
+	if blobETag == "" || jsonETag == "" {
+		t.Errorf("ETags must not be empty: blob=%q json=%q", blobETag, jsonETag)
+	}
+}
+
+func TestBlobETag304(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Get the blob ETag
+	resp := doGetWithAccept(t, ts, "/"+blobRef, "image/png")
+	etag := resp.Header.Get("ETag")
+	resp.Body.Close()
+
+	// Same Accept + matching ETag → 304
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+blobRef, nil)
+	req.Header.Set("Accept", "image/png")
+	req.Header.Set("If-None-Match", etag)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotModified {
+		t.Errorf("expected 304, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Blob ETag should NOT produce 304 for JSON request
+	req2, _ := http.NewRequest(http.MethodGet, ts.URL+"/"+blobRef, nil)
+	req2.Header.Set("Accept", "application/json")
+	req2.Header.Set("If-None-Match", etag)
+	resp2, _ := http.DefaultClient.Do(req2)
+	if resp2.StatusCode == http.StatusNotModified {
+		t.Errorf("blob ETag + JSON Accept: should NOT get 304")
+	}
+	resp2.Body.Close()
+}
+
+func TestBlobStrippedFromListResponse(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+	putFixture(t, ts, "blob.json")
+
+	resp := doGet(t, ts, "/search")
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	for _, raw := range list.Items {
+		var obj map[string]json.RawMessage
+		json.Unmarshal(raw, &obj)
+		var item Item
+		json.Unmarshal(obj["item"], &item)
+		if item.Type != "BLOB" {
+			continue
+		}
+
+		// BLOB in list: content should have mime_type, size, sha256 but NOT data
+		var content map[string]json.RawMessage
+		json.Unmarshal(item.Content, &content)
+		if _, hasData := content["data"]; hasData {
+			t.Error("BLOB in list response should not contain content.data")
+		}
+		if _, hasMime := content["mime_type"]; !hasMime {
+			t.Error("BLOB in list response should still contain content.mime_type")
+		}
+		if _, hasSha := content["sha256"]; !hasSha {
+			t.Error("BLOB in list response should still contain content.sha256")
+		}
+		if _, hasSize := content["size"]; !hasSize {
+			t.Error("BLOB in list response should still contain content.size")
+		}
+		return
+	}
+	t.Error("BLOB not found in list response")
+}
+
+func TestBlobStrippedFromInboundResponse(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+	putFixture(t, ts, "blob.json")
+
+	// Search for BLOB type specifically
+	resp := doGet(t, ts, "/search?type=BLOB")
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 BLOB item, got %d", len(list.Items))
+	}
+
+	var obj map[string]json.RawMessage
+	json.Unmarshal(list.Items[0], &obj)
+	var item Item
+	json.Unmarshal(obj["item"], &item)
+
+	var content map[string]json.RawMessage
+	json.Unmarshal(item.Content, &content)
+	if _, hasData := content["data"]; hasData {
+		t.Error("BLOB in search response should not contain content.data")
+	}
+}
+
 // --- helpers ---
 
 func doPut(t *testing.T, ts *httptest.Server, ref string, body []byte) *http.Response {
