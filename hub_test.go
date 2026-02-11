@@ -870,6 +870,32 @@ func TestBlobETag304(t *testing.T) {
 	resp2.Body.Close()
 }
 
+func TestBlobServedAsBinaryForBrowser(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "blob.json")
+
+	// Real browser Accept header includes text/html AND image types —
+	// BLOB should win over the default viewer
+	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/apng,*/*;q=0.8"
+	resp := doGetWithAccept(t, ts, "/"+blobRef, browserAccept)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "image/png" {
+		t.Errorf("expected image/png (blob takes priority over default viewer), got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Should be raw PNG, not HTML or JSON
+	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
+		t.Errorf("expected raw PNG bytes, got %d bytes", len(body))
+	}
+}
+
 func TestBlobStrippedFromListResponse(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()

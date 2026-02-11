@@ -522,9 +522,11 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 			isHTML = true
 		}
 	}
+	// BLOB content negotiation overrides the default viewer (but not PAGE/page-relation)
 	isBlob := false
-	if !isHTML && meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+	if meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
 		isBlob = true
+		isHTML = false
 	}
 	if isHTML {
 		etag = etag[:len(etag)-1] + `-html"`
@@ -563,6 +565,10 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 		}
 	}
 
+	if serveBlob(w, r, data) {
+		return
+	}
+
 	if acceptsHTML(r) {
 		html := p.resolvePageHTML(ref, data)
 		if html == "" && p.defaultViewerRef != "" && ref != p.defaultViewerRef {
@@ -575,10 +581,6 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 			return
 		}
 		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
-	}
-
-	if serveBlob(w, r, data) {
-		return
 	}
 
 	w.WriteHeader(http.StatusOK)

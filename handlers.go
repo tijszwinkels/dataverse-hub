@@ -60,9 +60,11 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			isHTML = true
 		}
 	}
+	// BLOB content negotiation overrides the default viewer (but not PAGE/page-relation)
 	isBlob := false
-	if !isHTML && meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+	if meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
 		isBlob = true
+		isHTML = false
 	}
 
 	if isHTML {
@@ -97,7 +99,15 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 // serveObject writes the response body for a GET that isn't 304.
 // ETag/Vary headers must already be set by the caller.
+// BLOB content negotiation runs first — it only fires for type BLOB, so
+// PAGE objects and page-relation HTML are unaffected. This ensures BLOBs
+// take priority over the default viewer (which would otherwise intercept
+// browser requests that include text/html in Accept).
 func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
+	if serveBlob(w, r, data) {
+		return
+	}
+
 	if acceptsHTML(r) {
 		html := h.resolvePageHTML(data)
 		if html == "" && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
@@ -109,10 +119,6 @@ func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, da
 			io.WriteString(w, html)
 			return
 		}
-	}
-
-	if serveBlob(w, r, data) {
-		return
 	}
 
 	w.WriteHeader(http.StatusOK)
