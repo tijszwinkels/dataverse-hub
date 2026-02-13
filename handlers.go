@@ -146,8 +146,9 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate magic marker
-	if env.In != "dataverse001" {
+	// Validate magic marker (supports both old and new format)
+	realms := ResolveIn(env, item)
+	if !realms.Contains("dataverse001") {
 		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
 		return
 	}

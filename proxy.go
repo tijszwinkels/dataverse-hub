@@ -159,7 +159,8 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
 		return
 	}
-	if env.In != "dataverse001" {
+	realms := ResolveIn(env, item)
+	if !realms.Contains("dataverse001") {
 		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
 		return
 	}

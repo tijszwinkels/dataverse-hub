@@ -2,18 +2,53 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
-// Envelope is the top-level signed dataverse001 object.
+// InField holds the "in" field. Accepts both string (legacy) and array of
+// strings. Always normalizes to a slice internally.
+type InField []string
+
+func (f *InField) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		*f = arr
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("'in' field must be a string or array of strings")
+	}
+	*f = []string{s}
+	return nil
+}
+
+func (f InField) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]string(f))
+}
+
+// Contains checks if a realm is present in the InField.
+func (f InField) Contains(realm string) bool {
+	for _, r := range f {
+		if r == realm {
+			return true
+		}
+	}
+	return false
+}
+
+// Envelope is the top-level signed object.
 type Envelope struct {
-	In        string          `json:"in"`
+	Is        string          `json:"is,omitempty"`
+	In        InField         `json:"in,omitempty"`
 	Signature string          `json:"signature"`
 	Item      json.RawMessage `json:"item"`
 }
 
 // Item is the parsed inner object.
 type Item struct {
+	In          InField                     `json:"in,omitempty"`
 	ID          string                      `json:"id"`
 	Pubkey      string                      `json:"pubkey"`
 	CreatedAt   string                      `json:"created_at"`
@@ -23,6 +58,19 @@ type Item struct {
 	Instruction string                      `json:"instruction,omitempty"`
 	Relations   map[string][]json.RawMessage `json:"relations,omitempty"`
 	Content     json.RawMessage             `json:"content,omitempty"`
+}
+
+// ResolveIn returns the authoritative realm list for an envelope+item pair.
+// New format: item.In is authoritative.
+// Old format: envelope.In is used as fallback.
+func ResolveIn(env *Envelope, item *Item) InField {
+	if len(item.In) > 0 {
+		return item.In
+	}
+	if len(env.In) > 0 {
+		return env.In
+	}
+	return nil
 }
 
 // Ref returns the composite key for this item.

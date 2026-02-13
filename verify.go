@@ -15,15 +15,13 @@ import (
 
 // VerifyEnvelope validates a signed dataverse001 envelope.
 // It checks the magic marker, required fields, and ECDSA P-256 signature.
+// Accepts both old format (in on envelope) and new format (in inside item).
 func VerifyEnvelope(data []byte) error {
 	var env Envelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		return fmt.Errorf("invalid JSON: %w", err)
 	}
 
-	if env.In != "dataverse001" {
-		return errors.New("missing or wrong 'in' marker")
-	}
 	if env.Signature == "" {
 		return errors.New("missing signature")
 	}
@@ -31,11 +29,18 @@ func VerifyEnvelope(data []byte) error {
 		return errors.New("missing item")
 	}
 
-	// Parse item to extract pubkey
+	// Parse item early — needed for both ResolveIn and field validation
 	var item Item
 	if err := json.Unmarshal(env.Item, &item); err != nil {
 		return fmt.Errorf("invalid item: %w", err)
 	}
+
+	// Check realm membership (supports both old and new format)
+	realms := ResolveIn(&env, &item)
+	if !realms.Contains("dataverse001") {
+		return errors.New("missing or wrong 'in' marker")
+	}
+
 	if item.Pubkey == "" {
 		return errors.New("missing item.pubkey")
 	}
