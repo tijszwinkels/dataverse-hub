@@ -205,13 +205,23 @@ func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 		mimeType = content.MimeType
 	}
 
+	// Extract first page relation ref
+	var pageRef string
+	if pageRels, ok := item.Relations["page"]; ok && len(pageRels) > 0 {
+		var rr RelationRef
+		if json.Unmarshal(pageRels[0], &rr) == nil && rr.Ref != "" {
+			pageRef = rr.Ref
+		}
+	}
+
 	// Meta
 	idx.meta[ref] = ObjectMeta{
 		Ref:             ref,
 		Pubkey:          item.Pubkey,
 		Type:            item.Type,
 		Revision:        item.Revision,
-		HasPageRelation: len(item.Relations["page"]) > 0,
+		HasPageRelation: pageRef != "",
+		PageRef:         pageRef,
 		MimeType:        mimeType,
 		UpdatedAt:       ts,
 	}

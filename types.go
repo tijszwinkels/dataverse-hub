@@ -50,7 +50,8 @@ type ObjectMeta struct {
 	Pubkey          string
 	Type            string
 	Revision        int
-	HasPageRelation bool // true if item has a "page" relation
+	HasPageRelation bool   // true if item has a "page" relation
+	PageRef         string // first page relation ref (for ETag computation)
 	MimeType        string // content.mime_type for BLOB objects (used for content negotiation)
 	UpdatedAt       time.Time
 }

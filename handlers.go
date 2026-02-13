@@ -68,7 +68,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isHTML {
-		etag = etag[:len(etag)-1] + `-html"`
+		etag = etag[:len(etag)-1] + pageETagSuffix(h.index, meta, h.defaultViewerRef) + `"`
 	} else if isBlob {
 		etag = etag[:len(etag)-1] + `-blob"`
 	}
@@ -481,6 +481,26 @@ func (h *Hub) resolveDefaultViewerHTML() string {
 		return ""
 	}
 	return h.resolvePageHTML(data)
+}
+
+// pageETagSuffix returns the ETag suffix for HTML representations.
+// Includes the page/viewer revision so browser caches invalidate when the PAGE changes.
+func pageETagSuffix(index *Index, meta ObjectMeta, defaultViewerRef string) string {
+	if meta.Type == "PAGE" {
+		return "-html" // own revision tracks HTML changes
+	}
+	pageRef := meta.PageRef
+	if pageRef == "" && defaultViewerRef != "" && meta.Ref != defaultViewerRef {
+		pageRef = defaultViewerRef
+	}
+	if pageRef == "" {
+		return "-html"
+	}
+	pageMeta, found := index.GetMeta(pageRef)
+	if !found {
+		return "-html"
+	}
+	return fmt.Sprintf("-p%d-html", pageMeta.Revision)
 }
 
 // extractHTML pulls the html string from item.content.html.

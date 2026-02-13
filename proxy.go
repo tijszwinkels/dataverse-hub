@@ -529,7 +529,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		isHTML = false
 	}
 	if isHTML {
-		etag = etag[:len(etag)-1] + `-html"`
+		etag = etag[:len(etag)-1] + pageETagSuffix(p.index, meta, p.defaultViewerRef) + `"`
 	} else if isBlob {
 		etag = etag[:len(etag)-1] + `-blob"`
 	}
@@ -558,7 +558,11 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 		if err == nil {
 			etag := `"` + strconv.Itoa(item.Revision) + `"`
 			if acceptsHTML(r) {
-				etag = etag[:len(etag)-1] + `-html"`
+				if meta, found := p.index.GetMeta(ref); found {
+					etag = etag[:len(etag)-1] + pageETagSuffix(p.index, meta, p.defaultViewerRef) + `"`
+				} else {
+					etag = etag[:len(etag)-1] + `-html"`
+				}
 			}
 			w.Header().Set("Vary", "Accept")
 			w.Header().Set("ETag", etag)
