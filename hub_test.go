@@ -991,6 +991,96 @@ func TestBlobStrippedFromInboundResponse(t *testing.T) {
 	}
 }
 
+// --- Text BLOB tests ---
+
+const textBlobRef = "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+func TestTextBlobServedAsRawText(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "text_blob.json")
+
+	// Request with Accept: application/javascript should return raw JS text
+	resp := doGetWithAccept(t, ts, "/"+textBlobRef, "application/javascript")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "application/javascript" {
+		t.Errorf("expected application/javascript content-type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	expected := `console.log("hello world");`
+	if string(body) != expected {
+		t.Errorf("expected %q, got %q", expected, string(body))
+	}
+}
+
+func TestTextBlobServedAsJSONForAPI(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "text_blob.json")
+
+	// Request with Accept: application/json should return JSON envelope
+	resp := doGetWithAccept(t, ts, "/"+textBlobRef, "application/json")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	var env Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("expected valid JSON envelope, got: %s", body)
+	}
+
+	// JSON should include content.text
+	var item Item
+	json.Unmarshal(env.Item, &item)
+	var content struct {
+		Text string `json:"text"`
+	}
+	json.Unmarshal(item.Content, &content)
+	if content.Text == "" {
+		t.Error("expected content.text in JSON response")
+	}
+}
+
+func TestTextBlobStrippedFromListResponse(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putAllFixtures(t, ts)
+	putFixture(t, ts, "text_blob.json")
+
+	resp := doGet(t, ts, "/search?type=BLOB")
+	var list ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	if len(list.Items) != 1 {
+		t.Fatalf("expected 1 BLOB item, got %d", len(list.Items))
+	}
+
+	var obj map[string]json.RawMessage
+	json.Unmarshal(list.Items[0], &obj)
+	var item Item
+	json.Unmarshal(obj["item"], &item)
+
+	var content map[string]json.RawMessage
+	json.Unmarshal(item.Content, &content)
+	if _, hasText := content["text"]; hasText {
+		t.Error("text BLOB in list response should not contain content.text")
+	}
+	if _, hasMime := content["mime_type"]; !hasMime {
+		t.Error("text BLOB in list response should still contain content.mime_type")
+	}
+}
+
 // --- helpers ---
 
 func doPut(t *testing.T, ts *httptest.Server, ref string, body []byte) *http.Response {

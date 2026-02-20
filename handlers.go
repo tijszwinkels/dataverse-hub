@@ -366,9 +366,10 @@ func acceptsMimeType(r *http.Request, mimeType string) bool {
 }
 
 // serveBlob checks if data is a BLOB object whose mime_type matches the
-// request's Accept header. If so, it decodes content.data and writes raw
-// bytes with the correct Content-Type and cache headers. Returns true if
-// it handled the response.
+// request's Accept header. If so, it serves the raw content with the correct
+// Content-Type and cache headers. Supports both binary BLOBs (content.data,
+// base64-encoded) and text BLOBs (content.text, plain string). Returns true
+// if it handled the response.
 func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
 	_, item, err := ParseEnvelope(data)
 	if err != nil || item.Type != "BLOB" || item.Content == nil {
@@ -378,9 +379,14 @@ func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
 	var content struct {
 		MimeType string `json:"mime_type"`
 		Data     string `json:"data"`
-		Size     int    `json:"size"`
+		Text     string `json:"text"`
 	}
-	if err := json.Unmarshal(item.Content, &content); err != nil || content.MimeType == "" || content.Data == "" {
+	if err := json.Unmarshal(item.Content, &content); err != nil || content.MimeType == "" {
+		return false
+	}
+
+	// Need either data (base64) or text (plain)
+	if content.Data == "" && content.Text == "" {
 		return false
 	}
 
@@ -388,10 +394,17 @@ func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
 		return false
 	}
 
-	raw, err := base64.StdEncoding.DecodeString(content.Data)
-	if err != nil {
-		log.Printf("WARN: serveBlob %s: base64 decode: %v", item.Ref(), err)
-		return false
+	var raw []byte
+	if content.Text != "" {
+		// Text BLOB: serve plain string directly
+		raw = []byte(content.Text)
+	} else {
+		// Binary BLOB: decode base64
+		raw, err = base64.StdEncoding.DecodeString(content.Data)
+		if err != nil {
+			log.Printf("WARN: serveBlob %s: base64 decode: %v", item.Ref(), err)
+			return false
+		}
 	}
 
 	w.Header().Set("Content-Type", content.MimeType)
@@ -402,9 +415,9 @@ func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
 	return true
 }
 
-// stripBlobData removes the content.data field from a BLOB object's JSON
-// representation, keeping all other fields (mime_type, size, sha256, filename).
-// Used in list responses to avoid sending large payloads.
+// stripBlobData removes the content.data and content.text fields from a BLOB
+// object's JSON representation, keeping metadata (mime_type, size, sha256,
+// filename). Used in list responses to avoid sending large payloads.
 func stripBlobData(data json.RawMessage) json.RawMessage {
 	var obj map[string]json.RawMessage
 	if json.Unmarshal(data, &obj) != nil {
@@ -427,6 +440,7 @@ func stripBlobData(data json.RawMessage) json.RawMessage {
 		return data
 	}
 	delete(content, "data")
+	delete(content, "text")
 	item["content"], _ = json.Marshal(content)
 	obj["item"], _ = json.Marshal(item)
 	result, _ := json.Marshal(obj)
