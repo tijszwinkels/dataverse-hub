@@ -22,14 +22,26 @@ func NewHub(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef s
 
 // Router returns the chi router with all routes and middleware.
 func (h *Hub) Router() http.Handler {
+	return h.RouterWithAuthWidget(AuthWidgetConfig{})
+}
+
+// RouterWithAuthWidget returns the chi router with auth widget support.
+// If cfg.AuthHost is empty, the widget route and CORS middleware are skipped.
+func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
+	if cfg.AuthHost != "" {
+		r.Use(corsMiddleware(cfg))
+	}
 	r.Use(jsonContentType)
 
+	if cfg.AuthHost != "" {
+		r.Get("/widget", authWidgetHandler(cfg))
+	}
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
 	r.Get("/{ref}", h.handleGetObject)

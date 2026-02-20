@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -36,11 +37,20 @@ func main() {
 	var handler http.Handler
 	var proxyCleanup []func() // cleanup functions for proxy mode
 
+	// Auth widget config
+	awCfg := AuthWidgetConfig{
+		AuthHost:       cfg.AuthWidgetHost,
+		AllowedOrigins: cfg.AuthWidgetAllowedOrigins,
+	}
+	if awCfg.AuthHost != "" {
+		log.Printf("Auth widget enabled on %s", awCfg.AuthHost)
+	}
+
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
 		hub := NewHub(store, index, limiter, cfg.DefaultViewerRef)
-		handler = hub.Router()
+		handler = hub.RouterWithAuthWidget(awCfg)
 
 	default: // "proxy" is the default
 		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
@@ -62,7 +72,7 @@ func main() {
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
 		proxy := NewProxy(store, index, limiter, cfg.DefaultViewerRef, upstream, pending)
-		handler = proxy.Router()
+		handler = proxy.RouterWithAuthWidget(awCfg)
 	}
 
 	srv := &http.Server{
@@ -101,7 +111,7 @@ func main() {
 }
 
 func loadConfig() Config {
-	return Config{
+	cfg := Config{
 		Mode:             envOr("DATAVERSE_MODE", "proxy"),
 		UpstreamURL:      envOr("DATAVERSE_UPSTREAM_URL", "https://dataverse001.net"),
 		Addr:             envOr("HUB_ADDR", ":5678"),
@@ -110,7 +120,17 @@ func loadConfig() Config {
 		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 20000),
 		DefaultViewerRef: envOr("HUB_DEFAULT_VIEWER_REF", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"),
 		BackupEnabled:    envOr("HUB_BACKUP_ENABLED", "true") == "true",
+		AuthWidgetHost:   envOr("HUB_AUTH_WIDGET_HOST", ""),
 	}
+	// Parse comma-separated allowed origins
+	if origins := envOr("HUB_AUTH_WIDGET_ALLOWED_ORIGINS", ""); origins != "" {
+		for _, o := range splitTrim(origins, ",") {
+			if o != "" {
+				cfg.AuthWidgetAllowedOrigins = append(cfg.AuthWidgetAllowedOrigins, o)
+			}
+		}
+	}
+	return cfg
 }
 
 func envOr(key, def string) string {
@@ -118,6 +138,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func splitTrim(s, sep string) []string {
+	parts := strings.Split(s, sep)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envOrInt(key string, def int) int {

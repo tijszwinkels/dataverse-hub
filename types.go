@@ -139,4 +139,7 @@ type Config struct {
 	RateLimitPerDay  int
 	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
 	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
+
+	AuthWidgetHost           string   // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
+	AuthWidgetAllowedOrigins []string // origins that may embed the widget (e.g. ["https://dataverse001.net"])
 }

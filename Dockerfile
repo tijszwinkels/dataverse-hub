@@ -3,6 +3,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
+COPY widget.html ./
 RUN CGO_ENABLED=0 go build -o /hub .
 
 FROM alpine:3.21

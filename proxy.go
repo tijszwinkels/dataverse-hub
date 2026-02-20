@@ -38,14 +38,25 @@ func NewProxy(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef
 
 // Router returns the chi router with proxy handlers and middleware.
 func (p *Proxy) Router() http.Handler {
+	return p.RouterWithAuthWidget(AuthWidgetConfig{})
+}
+
+// RouterWithAuthWidget returns the chi router with auth widget support.
+func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(p.limiter.Middleware)
+	if cfg.AuthHost != "" {
+		r.Use(corsMiddleware(cfg))
+	}
 	r.Use(jsonContentType)
 
+	if cfg.AuthHost != "" {
+		r.Get("/widget", authWidgetHandler(cfg))
+	}
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
 	r.Get("/{ref}", p.handleGetObject)
