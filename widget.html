@@ -53,7 +53,7 @@ body{
 .attest-bar{
   width:100%;padding:6px 12px;font-size:12px;font-weight:600;
   text-align:center;cursor:pointer;user-select:none;
-  transition:background .3s;
+  transition:all .25s ease;
   letter-spacing:0.3px;
   min-height:28px;
   display:flex;align-items:center;justify-content:center;
@@ -63,10 +63,22 @@ body{
   font-size:10px;font-weight:400;opacity:0.7;margin-left:8px;
 }
 
+/* Collapsed pill: fixed bottom-left, compact */
+.attest-bar.pill{
+  position:fixed;bottom:0;left:0;
+  width:auto;max-width:220px;
+  border-radius:0 12px 0 0;
+  padding:5px 14px;
+  font-size:11px;
+  box-shadow:0 -2px 12px rgba(0,0,0,0.15);
+  z-index:10;
+}
+.attest-bar.pill .attest-warn{display:none}
+
 /* Main container */
 .widget-body{
-  padding:12px;
-  max-width:320px;
+  padding:10px;
+  max-width:280px;
   width:100%;
 }
 
@@ -162,6 +174,17 @@ html.dark .btn-danger:hover{background:rgba(248,81,73,0.18)}
 }
 .phrase-custom-input:focus{outline:none;border-color:var(--accent)}
 
+/* Phrase verification (unlock view) */
+.phrase-verify{margin-top:8px}
+.phrase-verify-preview{
+  text-align:center;padding:8px;border-radius:6px;
+  font-size:13px;font-weight:700;letter-spacing:0.3px;
+}
+.phrase-verify-warn{
+  font-size:10px;color:var(--danger);margin-top:4px;line-height:1.3;
+  font-weight:500;
+}
+
 /* Action items */
 .action-item{
   padding:8px 10px;border-bottom:1px solid var(--action-border);font-size:12px;
@@ -196,15 +219,56 @@ html.dark .btn-danger:hover{background:rgba(248,81,73,0.18)}
   transition:opacity .15s;line-height:1;z-index:1;
 }
 .theme-toggle:hover{opacity:1}
+
+/* ── Embedded mode ── */
+body.embedded{background:transparent}
+body.embedded .attest-bar{
+  font-size:11px;min-height:22px;padding:3px 10px;
+  border-radius:5px;margin-bottom:4px;
+  opacity:.85;
+}
+body.embedded .attest-bar.empty{
+  background:transparent;color:var(--text-dimmer);
+  border:1px solid var(--card-border);
+}
+body.embedded .attest-bar.pill{
+  position:static;border-radius:5px;box-shadow:none;max-width:none;width:100%;
+}
+body.embedded .widget-body{max-width:none;padding:0}
+body.embedded .card{
+  padding:10px 12px;margin-bottom:6px;
+  background:transparent;border:1px solid var(--card-border);
+}
+body.embedded .onboard-card{
+  padding:8px 10px;margin-bottom:6px;font-size:11px;line-height:1.4;
+}
+body.embedded .onboard-card h3{font-size:12px;margin-bottom:4px}
+body.embedded .key-display{font-size:9px}
+body.embedded .status{font-size:12px;margin-bottom:4px}
+body.embedded .section-title{font-size:11px;margin-top:8px;margin-bottom:2px}
+body.embedded .action-item{padding:5px 6px;font-size:11px}
+body.embedded .action-time{font-size:9px}
+body.embedded .actions{gap:4px;margin-top:6px}
+body.embedded button{padding:5px 10px;font-size:12px}
+body.embedded .btn-small{padding:3px 8px;font-size:10px}
+body.embedded label{font-size:11px;margin-top:6px;margin-bottom:2px}
+body.embedded input[type=text],body.embedded input[type=password]{
+  padding:5px 8px;font-size:12px;
+}
+body.embedded .warn{padding:6px 8px;font-size:10px;margin-top:6px}
+body.embedded .info{font-size:10px}
+body.embedded .toggle-row{font-size:11px;margin-top:4px}
+body.embedded .phrase-verify-preview{padding:6px;font-size:11px}
+body.embedded .phrase-verify-warn{font-size:9px}
 </style>
 </head>
 <body>
 
 <button class="theme-toggle" id="btn-theme" title="Toggle dark mode">&#9789;</button>
 
-<!-- Attestation bar (always visible) -->
+<!-- Header bar (always visible, click to collapse/expand) -->
 <div class="attest-bar empty" id="attest-bar" title="Click to expand/collapse" style="position:relative">
-  <span id="attest-text">Not signed in</span>
+  <span id="attest-text">Identity</span>
 </div>
 
 <!-- Collapsed: nothing else shown -->
@@ -270,6 +334,11 @@ html.dark .btn-danger:hover{background:rgba(248,81,73,0.18)}
       <div style="font-size:13px;margin-bottom:2px" id="unlock-name"></div>
       <div class="key-display" id="unlock-pubkey"></div>
 
+      <div id="unlock-phrase-box" class="phrase-verify hidden">
+        <div class="phrase-verify-preview" id="unlock-phrase-preview"></div>
+        <div class="phrase-verify-warn">Never enter your password if this phrase or color doesn't match.</div>
+      </div>
+
       <label for="unlock-pass">Password</label>
       <input type="password" id="unlock-pass" placeholder="Enter password to unlock">
       <div id="unlock-error" class="error"></div>
@@ -287,6 +356,7 @@ html.dark .btn-danger:hover{background:rgba(248,81,73,0.18)}
       <div class="key-display" id="unlocked-pubkey"></div>
       <div class="actions">
         <button class="btn-secondary btn-small" id="btn-lock">Lock</button>
+        <button class="btn-danger btn-small" id="btn-logout">Logout</button>
       </div>
     </div>
 
@@ -334,6 +404,14 @@ var HUB_API = 'https://dataverse001.net';
 var urlParams = new URLSearchParams(window.location.search);
 var hubOverride = urlParams.get('hub');
 if (hubOverride) { HUB_API = hubOverride; }
+
+// Embedded mode: hide theme toggle, no pill collapse, adapted styling
+var EMBEDDED = urlParams.get('embedded') === '1';
+var themeParam = urlParams.get('theme');
+if (EMBEDDED) {
+  document.getElementById('btn-theme').classList.add('hidden');
+  document.body.classList.add('embedded');
+}
 
 var ALLOWED_ORIGINS = [
   'https://dataverse001.net',
@@ -560,12 +638,16 @@ function applyTheme(dark) {
   document.getElementById('btn-theme').textContent = dark ? '\u2600' : '\u263D';
 }
 
-// Apply saved theme immediately
+// Apply theme: query param > saved > system preference
 (function() {
-  var saved = LS.get('theme');
-  if (saved === 'dark') applyTheme(true);
-  else if (saved === 'light') applyTheme(false);
-  else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) applyTheme(true);
+  if (themeParam === 'dark') applyTheme(true);
+  else if (themeParam === 'light') applyTheme(false);
+  else {
+    var saved = LS.get('theme');
+    if (saved === 'dark') applyTheme(true);
+    else if (saved === 'light') applyTheme(false);
+    else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) applyTheme(true);
+  }
 })();
 
 document.getElementById('btn-theme').addEventListener('click', function() {
@@ -613,19 +695,18 @@ function getContrastColor(hslStr) {
 function updateAttestBar() {
   var bar = document.getElementById('attest-bar');
   var textEl = document.getElementById('attest-text');
-  var phrase = LS.get('attest_phrase');
-  var color = LS.get('attest_color');
+  var name = LS.get('name');
 
-  if (phrase && color) {
+  if (name) {
     bar.className = 'attest-bar';
-    bar.style.backgroundColor = color;
-    bar.style.color = getContrastColor(color);
-    textEl.innerHTML = esc(phrase) + '<span class="attest-warn">Always check your color and phrase</span>';
+    bar.style.backgroundColor = '';
+    bar.style.color = '';
+    textEl.textContent = name;
   } else {
     bar.className = 'attest-bar empty';
     bar.style.backgroundColor = '';
     bar.style.color = '';
-    textEl.textContent = 'Not signed in';
+    textEl.textContent = 'Identity';
   }
 }
 
@@ -809,6 +890,21 @@ async function deleteAction(ref) {
 var ALL_VIEWS = ['view-onboard', 'view-setup', 'view-phrase-setup', 'view-unlock', 'view-unlocked'];
 
 function showView(id) {
+  // Populate phrase verification when showing unlock view
+  if (id === 'view-unlock') {
+    var phrase = LS.get('attest_phrase');
+    var color = LS.get('attest_color');
+    var phraseBox = document.getElementById('unlock-phrase-box');
+    var phrasePreview = document.getElementById('unlock-phrase-preview');
+    if (phrase && color) {
+      phrasePreview.textContent = phrase;
+      phrasePreview.style.backgroundColor = color;
+      phrasePreview.style.color = getContrastColor(color);
+      phraseBox.classList.remove('hidden');
+    } else {
+      phraseBox.classList.add('hidden');
+    }
+  }
   for (var i = 0; i < ALL_VIEWS.length; i++) {
     var el = document.getElementById(ALL_VIEWS[i]);
     if (el) {
@@ -837,10 +933,16 @@ function showStatus(elId, msg) {
 
 function setCollapsed(collapsed) {
   var body = document.getElementById('widget-body');
+  var bar = document.getElementById('attest-bar');
+  var themeBtn = document.getElementById('btn-theme');
   if (collapsed) {
     body.classList.add('hidden');
+    if (!EMBEDDED) bar.classList.add('pill');
+    themeBtn.classList.add('hidden');
   } else {
     body.classList.remove('hidden');
+    bar.classList.remove('pill');
+    if (!EMBEDDED) themeBtn.classList.remove('hidden');
   }
   LS.set('collapsed', collapsed ? '1' : '0');
   notifyResize();
@@ -849,8 +951,18 @@ function setCollapsed(collapsed) {
 // ── Resize notification ──
 
 function notifyResize() {
-  var height = document.documentElement.scrollHeight;
-  notifyParent({ type: 'widget-resize', height: height });
+  // Wait for DOM reflow before measuring
+  requestAnimationFrame(function() {
+    // Sum heights of visible top-level children for accurate measurement
+    var total = 0;
+    var children = document.body.children;
+    for (var i = 0; i < children.length; i++) {
+      if (!children[i].classList.contains('hidden') && getComputedStyle(children[i]).display !== 'none') {
+        total += children[i].offsetHeight;
+      }
+    }
+    notifyParent({ type: 'widget-resize', height: total || document.documentElement.scrollHeight });
+  });
 }
 
 // ── Parent communication ──
@@ -1032,8 +1144,10 @@ function initUI() {
     document.getElementById('unlock-name').textContent = LS.get('name') || 'Unknown';
     document.getElementById('unlock-pubkey').textContent = LS.get('pubkey');
 
-    if (LS.get('collapsed') === '1') {
+    if (!EMBEDDED && LS.get('collapsed') === '1') {
       setCollapsed(true);
+      broadcastAuth(true);
+      return; // skip showView, already collapsed
     } else {
       showView('view-unlock');
     }
@@ -1077,9 +1191,8 @@ document.getElementById('attest-bar').addEventListener('click', function() {
   var body = document.getElementById('widget-body');
   var isCollapsed = body.classList.contains('hidden');
   if (isCollapsed) {
-    // Expand
-    body.classList.remove('hidden');
-    LS.set('collapsed', '0');
+    // Expand via setCollapsed (removes pill, shows body, restores theme btn)
+    setCollapsed(false);
     // Show the right view
     if (wallet.privateKey) {
       showUnlocked();
@@ -1318,6 +1431,17 @@ document.getElementById('btn-lock').addEventListener('click', function() {
   notifyResize();
 });
 
+// Logout (full identity clear from unlocked state)
+document.getElementById('btn-logout').addEventListener('click', function() {
+  if (confirm('Log out? This will forget your identity on this device. You can sign back in with the same username + password.')) {
+    clearIdentity();
+    wallet = { privateKey: null, pubkey: null, identityRef: null, name: null, username: null };
+    updateAttestBar();
+    broadcastAuthChanged(true);
+    initUI();
+  }
+});
+
 // Auto-sign toggle
 document.getElementById('auto-sign-check').addEventListener('change', function() {
   LS.set('auto_sign', this.checked ? '1' : '0');
@@ -1476,6 +1600,21 @@ window.addEventListener('message', function(e) {
     // Manual: queue in pending
     pendingRequests.push(req);
     renderPendingRequests();
+  }
+
+  // Theme sync from parent app
+  if (msg.type === 'theme-change') {
+    if (msg.theme === 'dark' || msg.theme === 'light') {
+      applyTheme(msg.theme === 'dark');
+    }
+  }
+
+  // Expand/collapse from parent app
+  if (msg.type === 'widget-expand') {
+    setCollapsed(false);
+    if (wallet.privateKey) showUnlocked();
+    else if (isReturningUser()) showView('view-unlock');
+    else showView('view-setup');
   }
 });
 
