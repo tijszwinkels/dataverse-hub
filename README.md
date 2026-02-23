@@ -28,20 +28,46 @@ docker run -p 5678:5678 -v ./dataverse001:/dataverse001 hub
 
 ## Configuration
 
-All via environment variables:
+Configure via TOML file, environment variables, or both. Precedence: **defaults < config file < env vars**.
 
-| Variable | Default | Description |
+```bash
+cp hub.example.toml hub.toml
+./hub -config hub.toml
+```
+
+See [`hub.example.toml`](hub.example.toml) for all options with comments.
+
+### Config file (TOML)
+
+| Key | Default | Description |
 |---|---|---|
-| `DATAVERSE_MODE` | `proxy` | `root` or `proxy` |
-| `DATAVERSE_UPSTREAM_URL` | `https://dataverse001.net` | Upstream hub (proxy mode) |
-| `HUB_ADDR` | `:5678` | Listen address |
-| `HUB_STORE_DIR` | `./dataverse001` | Object store directory |
-| `HUB_RATE_LIMIT_PER_MIN` | `120` | Requests per minute per IP |
-| `HUB_RATE_LIMIT_PER_DAY` | `20000` | Requests per day per IP |
-| `HUB_DEFAULT_VIEWER_REF` | *(built-in)* | PAGE ref used as default HTML viewer |
-| `HUB_BACKUP_ENABLED` | `true` | Keep old revisions in `bk/` |
-| `HUB_AUTH_WIDGET_HOST` | *(empty)* | Hostname for auth widget (e.g. `auth.dataverse001.net`) |
-| `HUB_AUTH_WIDGET_ALLOWED_ORIGINS` | *(empty)* | Comma-separated origins that may embed the widget |
+| `mode` | `"proxy"` | `"root"` or `"proxy"` |
+| `upstream_url` | `"https://dataverse001.net"` | Upstream hub (proxy mode) |
+| `addr` | `":5678"` | Listen address |
+| `store_dir` | `"./dataverse001"` | Object store directory |
+| `rate_limit_per_min` | `120` | Requests per minute per IP |
+| `rate_limit_per_day` | `20000` | Requests per day per IP |
+| `default_viewer_ref` | *(built-in)* | PAGE ref used as default HTML viewer |
+| `backup_enabled` | `true` | Keep old revisions in `bk/` |
+| `auth_widget_host` | *(empty)* | Hostname for auth widget |
+| `auth_widget_allowed_origins` | `[]` | Origins that may embed the widget |
+
+### Environment variables
+
+Env vars override any value from the config file:
+
+| Variable | Config key |
+|---|---|
+| `DATAVERSE_MODE` | `mode` |
+| `DATAVERSE_UPSTREAM_URL` | `upstream_url` |
+| `HUB_ADDR` | `addr` |
+| `HUB_STORE_DIR` | `store_dir` |
+| `HUB_RATE_LIMIT_PER_MIN` | `rate_limit_per_min` |
+| `HUB_RATE_LIMIT_PER_DAY` | `rate_limit_per_day` |
+| `HUB_DEFAULT_VIEWER_REF` | `default_viewer_ref` |
+| `HUB_BACKUP_ENABLED` | `backup_enabled` |
+| `HUB_AUTH_WIDGET_HOST` | `auth_widget_host` |
+| `HUB_AUTH_WIDGET_ALLOWED_ORIGINS` | `auth_widget_allowed_origins` (comma-separated) |
 
 ## API
 

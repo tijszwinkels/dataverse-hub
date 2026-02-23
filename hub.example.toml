@@ -1,0 +1,29 @@
+# Dataverse Hub configuration
+# Copy to hub.toml and adjust as needed.
+# Environment variables override values set here.
+
+# "root" (authoritative) or "proxy" (cache + forward)
+# mode = "proxy"
+
+# Upstream hub URL (proxy mode only)
+# upstream_url = "https://dataverse001.net"
+
+# Listen address
+# addr = ":5678"
+
+# Object store directory
+# store_dir = "./dataverse001"
+
+# Rate limiting
+# rate_limit_per_min = 120
+# rate_limit_per_day = 20000
+
+# PAGE ref used as default HTML viewer for browser requests
+# default_viewer_ref = "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"
+
+# Keep old revisions in bk/ on update
+# backup_enabled = true
+
+# Auth widget (cross-origin identity widget)
+# auth_widget_host = "auth.dataverse001.net"
+# auth_widget_allowed_origins = ["https://dataverse001.net"]

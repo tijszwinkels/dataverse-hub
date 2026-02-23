@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -110,57 +108,3 @@ func main() {
 	log.Println("Server stopped")
 }
 
-func loadConfig() Config {
-	cfg := Config{
-		Mode:             envOr("DATAVERSE_MODE", "proxy"),
-		UpstreamURL:      envOr("DATAVERSE_UPSTREAM_URL", "https://dataverse001.net"),
-		Addr:             envOr("HUB_ADDR", ":5678"),
-		StoreDir:         envOr("HUB_STORE_DIR", "./dataverse001"),
-		RateLimitPerMin:  envOrInt("HUB_RATE_LIMIT_PER_MIN", 120),
-		RateLimitPerDay:  envOrInt("HUB_RATE_LIMIT_PER_DAY", 20000),
-		DefaultViewerRef: envOr("HUB_DEFAULT_VIEWER_REF", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b"),
-		BackupEnabled:    envOr("HUB_BACKUP_ENABLED", "true") == "true",
-		AuthWidgetHost:   envOr("HUB_AUTH_WIDGET_HOST", ""),
-	}
-	// Parse comma-separated allowed origins
-	if origins := envOr("HUB_AUTH_WIDGET_ALLOWED_ORIGINS", ""); origins != "" {
-		for _, o := range splitTrim(origins, ",") {
-			if o != "" {
-				cfg.AuthWidgetAllowedOrigins = append(cfg.AuthWidgetAllowedOrigins, o)
-			}
-		}
-	}
-	return cfg
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
-}
-
-func splitTrim(s, sep string) []string {
-	parts := strings.Split(s, sep)
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-func envOrInt(key string, def int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		log.Printf("WARN: invalid %s=%q, using default %d", key, v, def)
-		return def
-	}
-	return n
-}
