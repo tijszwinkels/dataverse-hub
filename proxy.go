@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -282,6 +284,7 @@ func (p *Proxy) handleInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 // forwardListEndpoint forwards a list-type request to upstream, falling back to local on failure.
+// When the user is authenticated, merges local private objects into upstream results.
 func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.baseURL+upstreamPath, nil)
 	if err != nil {
@@ -309,10 +312,27 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 		return
 	}
 
-	// Forward upstream response directly
 	body, _ := io.ReadAll(resp.Body)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+
+	// If user is not authenticated, forward upstream response as-is (fast path)
+	authPK := AuthPubkey(r)
+	if authPK == "" {
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	// User is authenticated — merge local private objects into upstream results
+	var upstreamResp ListResponse
+	if err := json.Unmarshal(body, &upstreamResp); err != nil {
+		// Can't parse upstream response — forward raw
+		log.Printf("[proxy] WARN: forward %s: parse upstream response: %v", upstreamPath, err)
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	p.mergePrivateIntoUpstream(w, r, upstreamResp, authPK)
 }
 
 // serveLocalList serves list/inbound results from the local index (fallback).
@@ -348,6 +368,165 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeList(w, items, nextCursor, hasMore)
+}
+
+// mergePrivateIntoUpstream merges local private objects into an upstream list response.
+// Private objects never exist on upstream, so no dedup is needed. Both sources are sorted
+// by (UpdatedAt DESC, Ref), enabling a standard merge-sort.
+func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp ListResponse, authPK string) {
+	q := r.URL.Query()
+	ref := chi.URLParam(r, "ref")
+	includeInboundCounts := q.Get("include") == "inbound_counts"
+	limit := parseLimit(q.Get("limit"), 50, 200)
+	cursor := parseCursor(q.Get("cursor"))
+
+	// Query local index for objects visible to this user
+	var metas []ObjectMeta
+	if ref != "" {
+		filters := InboundFilters{
+			Relation: q.Get("relation"),
+			From:     q.Get("from"),
+			Type:     q.Get("type"),
+		}
+		metas = p.index.GetInbound(ref, filters, authPK)
+	} else {
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
+	}
+
+	// Filter to private-only objects (upstream already has public ones)
+	privateMetas := make([]ObjectMeta, 0, len(metas))
+	for _, m := range metas {
+		if !m.IsPublic {
+			privateMetas = append(privateMetas, m)
+		}
+	}
+
+	// Fast path: no local private objects — forward upstream response as-is
+	if len(privateMetas) == 0 {
+		writeList(w, upstreamResp.Items, upstreamResp.Cursor, upstreamResp.HasMore)
+		return
+	}
+
+	// Apply cursor to local private metas (skip items before cursor position)
+	if cursor != nil {
+		idx := 0
+		for idx < len(privateMetas) {
+			m := privateMetas[idx]
+			if m.UpdatedAt.Before(cursor.T) || (m.UpdatedAt.Equal(cursor.T) && m.Ref < cursor.Ref) {
+				break
+			}
+			idx++
+		}
+		privateMetas = privateMetas[idx:]
+	}
+
+	// Parse upstream items to extract sort keys
+	type sortableItem struct {
+		data      json.RawMessage
+		ref       string
+		updatedAt time.Time
+	}
+
+	upstreamItems := make([]sortableItem, 0, len(upstreamResp.Items))
+	for _, raw := range upstreamResp.Items {
+		ts, itemRef := extractSortKey(raw)
+		upstreamItems = append(upstreamItems, sortableItem{data: raw, ref: itemRef, updatedAt: ts})
+	}
+
+	// Load local private objects
+	localItems := make([]sortableItem, 0, len(privateMetas))
+	for _, m := range privateMetas {
+		data, err := p.store.Read(m.Ref)
+		if err != nil || data == nil {
+			continue
+		}
+		item := json.RawMessage(data)
+		if m.Type == "BLOB" {
+			item = stripBlobData(item)
+		}
+		localItems = append(localItems, sortableItem{data: item, ref: m.Ref, updatedAt: m.UpdatedAt})
+	}
+
+	// Merge-sort both lists by (UpdatedAt DESC, Ref DESC)
+	merged := make([]sortableItem, 0, len(upstreamItems)+len(localItems))
+	ui, li := 0, 0
+	for ui < len(upstreamItems) && li < len(localItems) {
+		u, l := upstreamItems[ui], localItems[li]
+		// Pick the newer item (DESC order)
+		if u.updatedAt.After(l.updatedAt) || (u.updatedAt.Equal(l.updatedAt) && u.ref >= l.ref) {
+			merged = append(merged, u)
+			ui++
+		} else {
+			merged = append(merged, l)
+			li++
+		}
+	}
+	for ; ui < len(upstreamItems); ui++ {
+		merged = append(merged, upstreamItems[ui])
+	}
+	for ; li < len(localItems); li++ {
+		merged = append(merged, localItems[li])
+	}
+
+	// Apply limit
+	hasMore := upstreamResp.HasMore || len(merged) > limit
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+
+	// Build result
+	items := make([]json.RawMessage, len(merged))
+	refs := make([]string, len(merged))
+	for i, m := range merged {
+		items[i] = m.data
+		refs[i] = m.ref
+	}
+
+	if includeInboundCounts {
+		items = p.enrichWithInboundCounts(items, refs)
+	}
+
+	// Generate cursor from last merged item
+	var nextCursor *string
+	if hasMore && len(merged) > 0 {
+		last := merged[len(merged)-1]
+		c := Cursor{T: last.updatedAt, Ref: last.ref}
+		encoded, _ := json.Marshal(c)
+		s := encodeBase64Cursor(encoded)
+		nextCursor = &s
+	}
+
+	writeList(w, items, nextCursor, hasMore)
+}
+
+// extractSortKey extracts (UpdatedAt, Ref) from a raw JSON item for merge-sorting.
+func extractSortKey(raw json.RawMessage) (time.Time, string) {
+	// Parse just the fields we need from the envelope
+	var env struct {
+		Item struct {
+			Pubkey    string `json:"pubkey"`
+			ID        string `json:"id"`
+			Ref       string `json:"ref"`
+			UpdatedAt string `json:"updated_at"`
+			CreatedAt string `json:"created_at"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(raw, &env) != nil {
+		return time.Time{}, ""
+	}
+
+	ref := env.Item.Ref
+	if ref == "" && env.Item.Pubkey != "" && env.Item.ID != "" {
+		ref = env.Item.Pubkey + "." + env.Item.ID
+	}
+
+	tsStr := env.Item.UpdatedAt
+	if tsStr == "" {
+		tsStr = env.Item.CreatedAt
+	}
+	ts, _ := time.Parse(time.RFC3339, tsStr)
+
+	return ts, ref
 }
 
 // paginateAndLoad applies cursor/limit to sorted metas, then loads the actual objects.
