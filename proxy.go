@@ -18,6 +18,7 @@ type Proxy struct {
 	store            *Store
 	index            *Index
 	limiter          *RateLimiter
+	auth             *AuthStore
 	defaultViewerRef string
 
 	upstream *Upstream
@@ -25,11 +26,12 @@ type Proxy struct {
 }
 
 // NewProxy creates a Proxy with the given components.
-func NewProxy(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef string, upstream *Upstream, pending *SyncPending) *Proxy {
+func NewProxy(store *Store, index *Index, limiter *RateLimiter, auth *AuthStore, defaultViewerRef string, upstream *Upstream, pending *SyncPending) *Proxy {
 	return &Proxy{
 		store:            store,
 		index:            index,
 		limiter:          limiter,
+		auth:             auth,
 		defaultViewerRef: defaultViewerRef,
 		upstream:         upstream,
 		pending:          pending,
@@ -49,10 +51,15 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(p.limiter.Middleware)
+	r.Use(p.auth.Middleware)
 	if cfg.AuthHost != "" {
 		r.Use(corsMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
+
+	// Auth routes (unauthenticated)
+	r.Get("/auth/challenge", p.auth.HandleChallenge)
+	r.Post("/auth/token", p.auth.HandleToken)
 
 	if cfg.AuthHost != "" {
 		r.Get("/widget", authWidgetHandler(cfg))
@@ -171,9 +178,19 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	realms := ResolveIn(env, item)
-	if !realms.Contains("dataverse001") {
+	if !realms.Contains("dataverse001") && len(PubkeyRealms(realms)) == 0 {
 		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
 		return
+	}
+
+	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
+	for _, pr := range PubkeyRealms(realms) {
+		if pr != item.Pubkey {
+			writeError(w, http.StatusForbidden,
+				"pubkey-realm does not match item pubkey",
+				"REALM_FORBIDDEN")
+			return
+		}
 	}
 	if ref != item.Ref() {
 		writeError(w, http.StatusBadRequest,
@@ -196,6 +213,12 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Private objects (no dataverse001) are stored locally only — never forwarded to upstream
+	if !IsPublicObject(realms) {
+		p.storePrivateLocally(w, ref, item, canonical, realms)
+		return
+	}
+
 	// Forward to upstream
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.baseURL+"/"+ref, nil)
 	if err != nil {
@@ -209,7 +232,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Upstream unreachable — store locally with sync pending
 		log.Printf("[proxy] WARN: PUT /%s: upstream unreachable, storing locally (sync pending)", ref)
-		p.storeLocallyWithPending(w, ref, item, canonical)
+		p.storeLocallyWithPending(w, ref, item, canonical, realms)
 		return
 	}
 	defer resp.Body.Close()
@@ -225,7 +248,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		// Cache locally
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
-		p.index.Update(ref, item, ts)
+		p.index.Update(ref, item, ts, realms)
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 		w.WriteHeader(resp.StatusCode)
@@ -277,8 +300,10 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	}
 	defer resp.Body.Close()
 
-	if isUpstreamDown(resp.StatusCode) {
-		log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
+	if isUpstreamDown(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
+		if resp.StatusCode != http.StatusNotFound {
+			log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
+		}
 		io.Copy(io.Discard, resp.Body)
 		p.serveLocalList(w, r)
 		return
@@ -298,6 +323,7 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
+	authPK := AuthPubkey(r)
 	var metas []ObjectMeta
 	if ref != "" {
 		// Inbound
@@ -306,10 +332,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
 		}
-		metas = p.index.GetInbound(ref, filters, "")
+		metas = p.index.GetInbound(ref, filters, authPK)
 	} else {
 		// Search
-		metas = p.index.GetAll(q.Get("by"), q.Get("type"), "")
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
 	}
 
 	limit := parseLimit(q.Get("limit"), 50, 200)
@@ -524,6 +550,15 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		return
 	}
 
+	// Private object access check
+	if !meta.IsPublic {
+		authPK := AuthPubkey(r)
+		if !HasMatchingRealm(meta.Realms, authPK) {
+			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			return
+		}
+	}
+
 	// Build ETag and check 304 (same logic as Hub.handleGetObject)
 	etag := `"` + strconv.Itoa(meta.Revision) + `"`
 	isHTML := false
@@ -648,8 +683,42 @@ func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 	return p.resolvePageHTML(reqRef, data)
 }
 
+// storePrivateLocally stores a private object locally without forwarding to upstream.
+func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
+	existingMeta, isUpdate := p.index.GetMeta(ref)
+	if isUpdate && existingMeta.Revision >= item.Revision {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
+			"REVISION_CONFLICT")
+		return
+	}
+
+	ts, err := item.Timestamp()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		return
+	}
+
+	if isUpdate {
+		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+			log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		}
+	}
+
+	if err := p.store.Write(ref, canonical, ts); err != nil {
+		log.Printf("[proxy] ERROR: PUT /%s: store write: %v", ref, err)
+		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		return
+	}
+	p.index.Update(ref, item, ts, realms)
+	log.Printf("stored %s rev %d (%s) [private, local-only]", ref, item.Revision, item.Type)
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write(canonical)
+}
+
 // storeLocallyWithPending stores an object locally and adds to sync pending.
-func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *Item, canonical []byte) {
+func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
 	if isUpdate && existingMeta.Revision >= item.Revision {
@@ -685,7 +754,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
-	p.index.Update(ref, item, ts)
+	p.index.Update(ref, item, ts, realms)
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending

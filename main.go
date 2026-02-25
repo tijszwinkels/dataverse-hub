@@ -73,7 +73,7 @@ func main() {
 		pending.Start()
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
-		proxy := NewProxy(store, index, limiter, cfg.DefaultViewerRef, upstream, pending)
+		proxy := NewProxy(store, index, limiter, auth, cfg.DefaultViewerRef, upstream, pending)
 		handler = proxy.RouterWithAuthWidget(awCfg)
 	}
 
