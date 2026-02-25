@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -24,6 +25,7 @@ type fileConfig struct {
 	BackupEnabled    *bool    `toml:"backup_enabled"`
 	AuthWidgetHost   *string  `toml:"auth_widget_host"`
 	AllowedOrigins   []string `toml:"auth_widget_allowed_origins"`
+	AuthTokenExpiry  *string  `toml:"auth_token_expiry"`
 }
 
 // loadConfig builds the final Config by layering: defaults < TOML file < env vars.
@@ -41,6 +43,7 @@ func loadConfig() Config {
 		RateLimitPerDay:  20000,
 		DefaultViewerRef: "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b",
 		BackupEnabled:    true,
+		AuthTokenExpiry:  168 * time.Hour, // 7 days
 	}
 
 	// 2. TOML file (if provided)
@@ -93,6 +96,13 @@ func applyFile(cfg *Config, path string) error {
 	if fc.AllowedOrigins != nil {
 		cfg.AuthWidgetAllowedOrigins = fc.AllowedOrigins
 	}
+	if fc.AuthTokenExpiry != nil {
+		if d, err := time.ParseDuration(*fc.AuthTokenExpiry); err == nil {
+			cfg.AuthTokenExpiry = d
+		} else {
+			log.Printf("WARN: invalid auth_token_expiry=%q, keeping %v", *fc.AuthTokenExpiry, cfg.AuthTokenExpiry)
+		}
+	}
 
 	return nil
 }
@@ -135,6 +145,13 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("HUB_AUTH_WIDGET_ALLOWED_ORIGINS"); v != "" {
 		cfg.AuthWidgetAllowedOrigins = splitTrim(v, ",")
+	}
+	if v := os.Getenv("HUB_AUTH_TOKEN_EXPIRY"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.AuthTokenExpiry = d
+		} else {
+			log.Printf("WARN: invalid HUB_AUTH_TOKEN_EXPIRY=%q, keeping %v", v, cfg.AuthTokenExpiry)
+		}
 	}
 }
 

@@ -7,17 +7,18 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-// Hub ties together the store, index, and rate limiter.
+// Hub ties together the store, index, rate limiter, and auth.
 type Hub struct {
 	store            *Store
 	index            *Index
 	limiter          *RateLimiter
+	auth             *AuthStore
 	defaultViewerRef string
 }
 
 // NewHub creates a Hub with the given components.
-func NewHub(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef string) *Hub {
-	return &Hub{store: store, index: index, limiter: limiter, defaultViewerRef: defaultViewerRef}
+func NewHub(store *Store, index *Index, limiter *RateLimiter, auth *AuthStore, defaultViewerRef string) *Hub {
+	return &Hub{store: store, index: index, limiter: limiter, auth: auth, defaultViewerRef: defaultViewerRef}
 }
 
 // Router returns the chi router with all routes and middleware.
@@ -34,10 +35,15 @@ func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
+	r.Use(h.auth.Middleware)
 	if cfg.AuthHost != "" {
 		r.Use(corsMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
+
+	// Auth routes (unauthenticated)
+	r.Get("/auth/challenge", h.auth.HandleChallenge)
+	r.Post("/auth/token", h.auth.HandleToken)
 
 	if cfg.AuthHost != "" {
 		r.Get("/widget", authWidgetHandler(cfg))

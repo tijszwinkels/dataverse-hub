@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // testHub creates a Hub with a temp store directory and returns the server + cleanup func.
@@ -23,12 +24,14 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 
 	index := NewIndex()
 	limiter := NewRateLimiter(1000, 100000) // generous limits for tests
-	hub := NewHub(store, index, limiter, "")
+	auth := NewAuthStore(168 * time.Hour)
+	hub := NewHub(store, index, limiter, auth, "")
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, func() {
 		ts.Close()
 		limiter.Stop()
+		auth.Stop()
 	}
 }
 
@@ -318,7 +321,7 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 
 	// Check that root has inbound relations
 	rootRef := fixtures["root.json"]
-	inbound := index.GetInbound(rootRef, InboundFilters{})
+	inbound := index.GetInbound(rootRef, InboundFilters{}, "")
 	if len(inbound) == 0 {
 		t.Error("expected inbound relations to root after rebuild")
 	}

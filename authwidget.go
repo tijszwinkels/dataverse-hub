@@ -47,8 +47,8 @@ func corsMiddleware(cfg AuthWidgetConfig) func(http.Handler) http.Handler {
 			origin := r.Header.Get("Origin")
 			if allowed[origin] {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, OPTIONS")
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+				w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept, Authorization")
 			}
 			if r.Method == "OPTIONS" {
 				w.WriteHeader(http.StatusNoContent)

@@ -22,7 +22,8 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 	rootStore, _ := NewStore(rootDir, true)
 	rootIndex := NewIndex()
 	rootLimiter := NewRateLimiter(10000, 1000000)
-	rootHub := NewHub(rootStore, rootIndex, rootLimiter, "")
+	rootAuth := NewAuthStore(168 * time.Hour)
+	rootHub := NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "")
 	rootSrv := httptest.NewServer(rootHub.Router())
 
 	// Proxy
@@ -42,6 +43,7 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 		rootSrv.Close()
 		rootLimiter.Stop()
 		proxyLimiter.Stop()
+		rootAuth.Stop()
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAuthWidgetHandler_MatchingHost(t *testing.T) {
@@ -182,7 +183,9 @@ func TestWidgetRouteInHubRouter(t *testing.T) {
 	limiter := NewRateLimiter(1000, 100000)
 	defer limiter.Stop()
 
-	hub := NewHub(store, index, limiter, "")
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+	hub := NewHub(store, index, limiter, auth, "")
 	cfg := AuthWidgetConfig{
 		AuthHost:       "auth.dataverse001.net",
 		AllowedOrigins: []string{"https://dataverse001.net"},

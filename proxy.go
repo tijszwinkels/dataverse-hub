@@ -68,7 +68,7 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 
 // handleRoot redirects to the ROOT object from local index.
 func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
-	metas := p.index.GetAll("", "ROOT")
+	metas := p.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
@@ -306,10 +306,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
 		}
-		metas = p.index.GetInbound(ref, filters)
+		metas = p.index.GetInbound(ref, filters, "")
 	} else {
 		// Search
-		metas = p.index.GetAll(q.Get("by"), q.Get("type"))
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), "")
 	}
 
 	limit := parseLimit(q.Get("limit"), 50, 200)

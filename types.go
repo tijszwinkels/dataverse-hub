@@ -98,9 +98,11 @@ type ObjectMeta struct {
 	Pubkey          string
 	Type            string
 	Revision        int
-	HasPageRelation bool   // true if item has a "page" relation
-	PageRef         string // first page relation ref (for ETag computation)
-	MimeType        string // content.mime_type for BLOB objects (used for content negotiation)
+	HasPageRelation bool     // true if item has a "page" relation
+	PageRef         string   // first page relation ref (for ETag computation)
+	MimeType        string   // content.mime_type for BLOB objects (used for content negotiation)
+	IsPublic        bool     // true if "dataverse001" in realms
+	Realms          []string // all realm strings from in field
 	UpdatedAt       time.Time
 }
 
@@ -140,6 +142,7 @@ type Config struct {
 	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
 	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
 
-	AuthWidgetHost           string   // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
-	AuthWidgetAllowedOrigins []string // origins that may embed the widget (e.g. ["https://dataverse001.net"])
+	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
+	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
+	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
 }

@@ -17,7 +17,7 @@ const maxBodySize = 10 << 20 // 10 MB
 
 // handleRoot serves GET / — redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
-	metas := h.index.GetAll("", "ROOT")
+	metas := h.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
@@ -46,6 +46,15 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		// Serve directly (rare fallback)
 		h.serveObject(w, r, ref, data)
 		return
+	}
+
+	// Private object access control: return 404 (not 403) to avoid leaking existence
+	if !meta.IsPublic {
+		authPK := AuthPubkey(r)
+		if !HasMatchingRealm(meta.Realms, authPK) {
+			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			return
+		}
 	}
 
 	// Build ETag from indexed revision
@@ -146,11 +155,33 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate magic marker (supports both old and new format)
+	// Resolve realms (supports both old and new format)
 	realms := ResolveIn(env, item)
+
+	// Validate pubkey-realms: each must match item.pubkey
+	for _, realm := range realms {
+		if IsPubkeyRealm(realm) && realm != item.Pubkey {
+			writeError(w, http.StatusForbidden,
+				"pubkey-realm does not match item pubkey", "REALM_FORBIDDEN")
+			return
+		}
+	}
+
+	// Object must belong to dataverse001 or a self-owned pubkey-realm
 	if !realms.Contains("dataverse001") {
-		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
-		return
+		hasSelfRealm := false
+		for _, realm := range realms {
+			if IsPubkeyRealm(realm) && realm == item.Pubkey {
+				hasSelfRealm = true
+				break
+			}
+		}
+		if !hasSelfRealm {
+			writeError(w, http.StatusBadRequest,
+				"object must belong to dataverse001 or a self-owned pubkey-realm",
+				"INVALID_OBJECT")
+			return
+		}
 	}
 
 	// Check ref matches
@@ -205,8 +236,8 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Update index
-	h.index.Update(ref, item, ts)
+	// Update index (pass realms for visibility tracking)
+	h.index.Update(ref, item, ts, realms)
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 	if isUpdate {
@@ -226,7 +257,8 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
-	metas := h.index.GetAll(pubkey, typeFilter)
+	authPK := AuthPubkey(r)
+	metas := h.index.GetAll(pubkey, typeFilter, authPK)
 	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
 
 	if includeInboundCounts {
@@ -250,7 +282,8 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
-	metas := h.index.GetInbound(ref, filters)
+	authPK := AuthPubkey(r)
+	metas := h.index.GetInbound(ref, filters, authPK)
 	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
 
 	if includeInboundCounts {
