@@ -41,9 +41,10 @@ func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	}
 	r.Use(jsonContentType)
 
-	// Auth routes (unauthenticated)
+	// Auth routes
 	r.Get("/auth/challenge", h.auth.HandleChallenge)
 	r.Post("/auth/token", h.auth.HandleToken)
+	r.Post("/auth/logout", h.auth.HandleLogout)
 
 	if cfg.AuthHost != "" {
 		r.Get("/widget", authWidgetHandler(cfg))

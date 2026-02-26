@@ -59,9 +59,10 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	}
 	r.Use(jsonContentType)
 
-	// Auth routes (unauthenticated)
+	// Auth routes
 	r.Get("/auth/challenge", p.auth.HandleChallenge)
 	r.Post("/auth/token", p.auth.HandleToken)
+	r.Post("/auth/logout", p.auth.HandleLogout)
 
 	if cfg.AuthHost != "" {
 		r.Get("/widget", authWidgetHandler(cfg))

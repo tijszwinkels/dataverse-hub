@@ -174,6 +174,36 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleLogout serves POST /auth/logout.
+// Invalidates the token (from bearer header or cookie) and clears the session cookie.
+// Always returns 200 — logout is idempotent.
+func (a *AuthStore) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	token := extractBearerToken(r)
+	if token == "" {
+		token = extractCookieToken(r)
+	}
+
+	if token != "" {
+		a.mu.Lock()
+		delete(a.tokens, token)
+		a.mu.Unlock()
+	}
+
+	// Clear the cookie regardless
+	http.SetCookie(w, &http.Cookie{
+		Name:     "dv_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 // ValidateToken returns the pubkey associated with a valid token, or ("", false).
 func (a *AuthStore) ValidateToken(token string) (string, bool) {
 	a.mu.Lock()

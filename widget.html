@@ -306,6 +306,28 @@ body.embedded .phrase-verify-warn{font-size:9px}
       </div>
     </div>
     <div class="warn">Your password can never be changed or recovered. It deterministically generates your cryptographic key. Choose wisely.</div>
+    <div style="text-align:center;margin-top:8px">
+      <button class="btn-link" id="btn-show-import">Import PEM key instead</button>
+    </div>
+  </div>
+
+  <!-- State: Import PEM key -->
+  <div id="view-import" class="hidden">
+    <div class="card">
+      <label for="import-pem">Private key (PEM)</label>
+      <textarea id="import-pem" rows="5" style="width:100%;padding:7px 10px;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;color:var(--text);font-size:11px;font-family:'SF Mono',Monaco,Consolas,monospace;resize:vertical" placeholder="-----BEGIN EC PRIVATE KEY-----&#10;...&#10;-----END EC PRIVATE KEY-----"></textarea>
+
+      <label for="import-name">Display name</label>
+      <input type="text" id="import-name" placeholder="Alice">
+
+      <div id="import-error" class="error"></div>
+      <div class="actions">
+        <button class="btn-primary" id="btn-import">Import</button>
+      </div>
+    </div>
+    <div style="text-align:center;margin-top:8px">
+      <button class="btn-link" id="btn-show-setup">Use username + password instead</button>
+    </div>
   </div>
 
   <!-- State: Security phrase setup -->
@@ -339,8 +361,14 @@ body.embedded .phrase-verify-warn{font-size:9px}
         <div class="phrase-verify-warn">Never enter your password if this phrase or color doesn't match.</div>
       </div>
 
-      <label for="unlock-pass">Password</label>
-      <input type="password" id="unlock-pass" placeholder="Enter password to unlock">
+      <div id="unlock-pass-group">
+        <label for="unlock-pass">Password</label>
+        <input type="password" id="unlock-pass" placeholder="Enter password to unlock">
+      </div>
+      <div id="unlock-pem-group" class="hidden">
+        <label for="unlock-pem">Private key (PEM)</label>
+        <textarea id="unlock-pem" rows="4" style="width:100%;padding:7px 10px;background:var(--input-bg);border:1px solid var(--input-border);border-radius:6px;color:var(--text);font-size:11px;font-family:'SF Mono',Monaco,Consolas,monospace;resize:vertical" placeholder="Paste your PEM key to unlock"></textarea>
+      </div>
       <div id="unlock-error" class="error"></div>
       <div class="actions">
         <button class="btn-primary" id="btn-unlock">Unlock</button>
@@ -399,11 +427,20 @@ var NOUNS = ['badger','bear','crane','dolphin','eagle','falcon','fox','hawk','he
 var IDENTITY_TYPE_DEF = 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.ec1abe1f-faad-45cd-9c18-7a48f6895035';
 var ROOT_REF = 'AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000';
 
-var HUB_API = 'https://dataverse001.net';
-// Allow override via query param
+// Derive HUB_API from widget origin: auth.example.com → example.com
 var urlParams = new URLSearchParams(window.location.search);
-var hubOverride = urlParams.get('hub');
-if (hubOverride) { HUB_API = hubOverride; }
+var HUB_API = (function() {
+  // Query param override takes priority
+  var override = urlParams.get('hub');
+  if (override) return override;
+  // Strip 'auth.' prefix from our hostname to get the hub origin
+  var host = window.location.hostname;
+  if (host.indexOf('auth.') === 0) {
+    return window.location.protocol + '//' + host.slice(5);
+  }
+  // Fallback for local dev or direct access
+  return window.location.origin;
+})();
 
 // Embedded mode: hide theme toggle, no pill collapse, adapted styling
 var EMBEDDED = urlParams.get('embedded') === '1';
@@ -413,8 +450,9 @@ if (EMBEDDED) {
   document.body.classList.add('embedded');
 }
 
+// Derive allowed postMessage origins from HUB_API
 var ALLOWED_ORIGINS = [
-  'https://dataverse001.net',
+  HUB_API,
   'http://localhost',
   'https://localhost'
 ];
@@ -589,6 +627,81 @@ async function signItem(privateKey, item) {
   return btoa(b);
 }
 
+// ── PEM import ──
+
+// Parse a PEM EC private key (SEC1 or PKCS#8) and return { privateKey, pubkeyB64url }.
+async function importPEM(pemText) {
+  // Strip headers, whitespace, decode base64
+  var lines = pemText.trim().split('\n');
+  var isSEC1 = lines[0].indexOf('EC PRIVATE KEY') !== -1;
+  var b64 = '';
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (line.indexOf('-----') === 0) continue;
+    b64 += line;
+  }
+  var der = base64urlDecode(b64.replace(/\+/g, '-').replace(/\//g, '_'));
+
+  if (!isSEC1) {
+    // PKCS#8: import directly via Web Crypto
+    var key = await crypto.subtle.importKey(
+      'pkcs8', der.buffer,
+      { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']
+    );
+    // Export JWK to get d, x, y for pubkey computation
+    var jwk = await crypto.subtle.exportKey('jwk', key);
+    var dBytes = base64urlDecode(jwk.d);
+    var pubX = bytesToBigInt(base64urlDecode(jwk.x));
+    var pubY = bytesToBigInt(base64urlDecode(jwk.y));
+    var compressed = compressPoint(pubX, pubY);
+    // Re-import as non-extractable for signing
+    delete jwk.key_ops; delete jwk.ext;
+    var signKey = await crypto.subtle.importKey(
+      'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']
+    );
+    return { privateKey: signKey, pubkeyB64url: base64urlEncode(compressed) };
+  }
+
+  // SEC1: parse ASN.1 to extract private key scalar
+  // Structure: SEQUENCE { INTEGER(1), OCTET STRING(d), [0] OID, [1] BIT STRING(pubkey) }
+  var pos = 0;
+  function readTag() {
+    var tag = der[pos++];
+    var len = der[pos++];
+    if (len & 0x80) {
+      var numBytes = len & 0x7f;
+      len = 0;
+      for (var j = 0; j < numBytes; j++) len = (len << 8) | der[pos++];
+    }
+    return { tag: tag, len: len, start: pos };
+  }
+
+  var seq = readTag(); // outer SEQUENCE
+  var ver = readTag(); // INTEGER (version = 1)
+  pos += ver.len;
+  var privOctet = readTag(); // OCTET STRING (private key d)
+  var dScalar = der.slice(privOctet.start, privOctet.start + privOctet.len);
+
+  // Compute public key from private scalar
+  var d = bytesToBigInt(dScalar);
+  var dBytes32 = bigIntToBytes(d, 32);
+  var pubPoint = ecMul(d, P256_GX, P256_GY);
+  var compressed = compressPoint(pubPoint[0], pubPoint[1]);
+  var pubkeyB64url = base64urlEncode(compressed);
+
+  // Import via JWK
+  var jwk = {
+    kty: 'EC', crv: 'P-256',
+    d: base64urlEncode(dBytes32),
+    x: base64urlEncode(bigIntToBytes(pubPoint[0], 32)),
+    y: base64urlEncode(bigIntToBytes(pubPoint[1], 32))
+  };
+  var privateKey = await crypto.subtle.importKey(
+    'jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']
+  );
+  return { privateKey: privateKey, pubkeyB64url: pubkeyB64url };
+}
+
 // ── Utility functions ──
 
 function generateUUID() {
@@ -658,11 +771,11 @@ document.getElementById('btn-theme').addEventListener('click', function() {
 });
 
 function isReturningUser() {
-  return LS.get('pubkey') && LS.get('username');
+  return LS.get('pubkey') && (LS.get('username') || LS.get('auth_mode') === 'pem');
 }
 
 function clearIdentity() {
-  var keys = ['username', 'pubkey', 'identity_ref', 'name', 'attest_phrase', 'attest_color', 'auto_sign', 'collapsed', 'onboarded'];
+  var keys = ['username', 'pubkey', 'identity_ref', 'name', 'attest_phrase', 'attest_color', 'auto_sign', 'collapsed', 'onboarded', 'auth_mode'];
   for (var i = 0; i < keys.length; i++) {
     LS.del(keys[i]);
   }
@@ -748,6 +861,80 @@ function isAllowedOrigin(origin) {
     if (origin.indexOf('http://127.0.0.1') === 0) return true;
   }
   return false;
+}
+
+// ── Hub Authentication ──
+
+// hubBearerToken holds the current session token (null if not authenticated).
+var hubBearerToken = null;
+
+// hubAuthenticate performs challenge-response auth with the hub.
+// Sets the dv_session cookie (via credentials: include) and stores the bearer token.
+// Returns { ok, token, error }.
+async function hubAuthenticate(privateKey, pubkeyB64url) {
+  try {
+    // Step 1: Get challenge
+    var challengeResp = await fetch(HUB_API + '/auth/challenge', {
+      headers: { 'Accept': 'application/json' }
+    });
+    if (!challengeResp.ok) {
+      console.error('Hub auth: challenge request failed:', challengeResp.status);
+      return { ok: false, error: 'Challenge request failed (' + challengeResp.status + ')' };
+    }
+    var challengeData = await challengeResp.json();
+    var challenge = challengeData.challenge;
+
+    // Step 2: Sign the challenge (SHA-256 hash is done by Web Crypto internally)
+    var enc = new TextEncoder();
+    var sigBuf = await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' }, privateKey, enc.encode(challenge)
+    );
+    // Convert P1363 → DER → base64 (standard, to match hub expectation)
+    var derSig = p1363ToDer(new Uint8Array(sigBuf));
+    var sigB64 = '';
+    for (var i = 0; i < derSig.length; i++) sigB64 += String.fromCharCode(derSig[i]);
+    sigB64 = btoa(sigB64);
+
+    // Step 3: Exchange for token (credentials: include to accept Set-Cookie cross-origin)
+    var tokenResp = await fetch(HUB_API + '/auth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        pubkey: pubkeyB64url,
+        challenge: challenge,
+        signature: sigB64
+      })
+    });
+    if (!tokenResp.ok) {
+      var errData = await tokenResp.json().catch(function() { return {}; });
+      console.error('Hub auth: token exchange failed:', tokenResp.status, errData);
+      return { ok: false, error: errData.error || 'Token exchange failed (' + tokenResp.status + ')' };
+    }
+
+    var tokenData = await tokenResp.json();
+    hubBearerToken = tokenData.token;
+    console.log('Hub auth: authenticated as', pubkeyB64url.slice(0, 8) + '...');
+    return { ok: true, token: tokenData.token };
+  } catch (e) {
+    console.error('Hub auth failed:', e);
+    return { ok: false, error: e.message };
+  }
+}
+
+// hubLogout calls POST /auth/logout to invalidate the session and clear the cookie.
+async function hubLogout() {
+  if (!hubBearerToken) return;
+  try {
+    await fetch(HUB_API + '/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: hubBearerToken ? { 'Authorization': 'Bearer ' + hubBearerToken } : {}
+    });
+  } catch (e) {
+    console.warn('Hub logout failed (non-fatal):', e);
+  }
+  hubBearerToken = null;
 }
 
 // ── Hub API ──
@@ -887,11 +1074,14 @@ async function deleteAction(ref) {
 
 // ── UI helpers ──
 
-var ALL_VIEWS = ['view-onboard', 'view-setup', 'view-phrase-setup', 'view-unlock', 'view-unlocked'];
+var ALL_VIEWS = ['view-onboard', 'view-setup', 'view-import', 'view-phrase-setup', 'view-unlock', 'view-unlocked'];
 
 function showView(id) {
   // Populate phrase verification when showing unlock view
   if (id === 'view-unlock') {
+    var isPEM = LS.get('auth_mode') === 'pem';
+    document.getElementById('unlock-pass-group').classList.toggle('hidden', isPEM);
+    document.getElementById('unlock-pem-group').classList.toggle('hidden', !isPEM);
     var phrase = LS.get('attest_phrase');
     var color = LS.get('attest_color');
     var phraseBox = document.getElementById('unlock-phrase-box');
@@ -987,7 +1177,8 @@ function broadcastAuth(locked) {
       pubkey: wallet.pubkey || LS.get('pubkey') || null,
       name: wallet.name || LS.get('name') || null,
       identityRef: wallet.identityRef || LS.get('identity_ref') || null,
-      locked: locked
+      locked: locked,
+      token: hubBearerToken || null
     }
   });
 }
@@ -999,7 +1190,8 @@ function broadcastAuthChanged(locked) {
       pubkey: wallet.pubkey || null,
       name: wallet.name || null,
       identityRef: wallet.identityRef || null,
-      locked: locked
+      locked: locked,
+      token: hubBearerToken || null
     }
   });
 }
@@ -1355,6 +1547,13 @@ document.getElementById('btn-confirm-phrase').addEventListener('click', async fu
     pendingIdentityData = null;
     pendingPhraseData = null;
 
+    // Authenticate with hub (non-blocking — UI shows immediately)
+    hubAuthenticate(wallet.privateKey, wallet.pubkey).then(function(result) {
+      if (!result.ok) console.warn('Hub auth after create failed:', result.error);
+      // Re-broadcast with token now available
+      broadcastAuthChanged(false);
+    });
+
     updateAttestBar();
     broadcastAuth(false);
     broadcastAuthChanged(false);
@@ -1369,21 +1568,49 @@ document.getElementById('btn-confirm-phrase').addEventListener('click', async fu
 // Unlock
 document.getElementById('btn-unlock').addEventListener('click', async function() {
   var btn = this;
-  var pass = document.getElementById('unlock-pass').value;
+  var isPEM = LS.get('auth_mode') === 'pem';
   showError('unlock-error', '');
 
-  if (!pass) return showError('unlock-error', 'Enter your password');
+  var kp;
+  if (isPEM) {
+    var pemText = document.getElementById('unlock-pem').value.trim();
+    if (!pemText) return showError('unlock-error', 'Paste your PEM private key');
 
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Deriving key...';
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Importing key...';
+
+    try {
+      kp = await importPEM(pemText);
+    } catch (e) {
+      console.error('PEM import failed:', e);
+      showError('unlock-error', 'Invalid PEM: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = 'Unlock';
+      return;
+    }
+  } else {
+    var pass = document.getElementById('unlock-pass').value;
+    if (!pass) return showError('unlock-error', 'Enter your password');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Deriving key...';
+
+    try {
+      var username = LS.get('username');
+      var salt = await deriveSalt(username);
+      kp = await deriveKeypair(pass, salt);
+    } catch (e) {
+      console.error('Key derivation failed:', e);
+      showError('unlock-error', 'Failed: ' + e.message);
+      btn.disabled = false;
+      btn.textContent = 'Unlock';
+      return;
+    }
+  }
 
   try {
-    var username = LS.get('username');
-    var salt = await deriveSalt(username);
-    var kp = await deriveKeypair(pass, salt);
-
     if (kp.pubkeyB64url !== LS.get('pubkey')) {
-      showError('unlock-error', 'Wrong password (derived key does not match)');
+      showError('unlock-error', isPEM ? 'Wrong key (does not match stored identity)' : 'Wrong password (derived key does not match)');
       return;
     }
 
@@ -1391,7 +1618,14 @@ document.getElementById('btn-unlock').addEventListener('click', async function()
     wallet.pubkey = kp.pubkeyB64url;
     wallet.identityRef = LS.get('identity_ref');
     wallet.name = LS.get('name');
-    wallet.username = username;
+    wallet.username = LS.get('username');
+
+    // Authenticate with hub (non-blocking — UI shows immediately)
+    hubAuthenticate(wallet.privateKey, wallet.pubkey).then(function(result) {
+      if (!result.ok) console.warn('Hub auth after unlock failed:', result.error);
+      // Re-broadcast with token now available
+      broadcastAuthChanged(false);
+    });
 
     broadcastAuth(false);
     broadcastAuthChanged(false);
@@ -1410,7 +1644,11 @@ document.getElementById('btn-unlock').addEventListener('click', async function()
 
 // Reset
 document.getElementById('btn-reset').addEventListener('click', function() {
-  if (confirm('Reset identity? This will forget the stored identity on this device. You can recreate it with the same username + password.')) {
+  var msg = LS.get('auth_mode') === 'pem'
+    ? 'Reset identity? This will forget the stored identity on this device. You can import your PEM key again.'
+    : 'Reset identity? This will forget the stored identity on this device. You can recreate it with the same username + password.';
+  if (confirm(msg)) {
+    hubLogout();
     clearIdentity();
     wallet = { privateKey: null, pubkey: null, identityRef: null, name: null, username: null };
     updateAttestBar();
@@ -1421,11 +1659,13 @@ document.getElementById('btn-reset').addEventListener('click', function() {
 
 // Lock
 document.getElementById('btn-lock').addEventListener('click', function() {
+  hubLogout();
   wallet.privateKey = null;
   broadcastAuthChanged(true);
   document.getElementById('unlock-name').textContent = LS.get('name') || 'Unknown';
   document.getElementById('unlock-pubkey').textContent = LS.get('pubkey');
   document.getElementById('unlock-pass').value = '';
+  document.getElementById('unlock-pem').value = '';
   showError('unlock-error', '');
   showView('view-unlock');
   notifyResize();
@@ -1433,7 +1673,11 @@ document.getElementById('btn-lock').addEventListener('click', function() {
 
 // Logout (full identity clear from unlocked state)
 document.getElementById('btn-logout').addEventListener('click', function() {
-  if (confirm('Log out? This will forget your identity on this device. You can sign back in with the same username + password.')) {
+  var msg = LS.get('auth_mode') === 'pem'
+    ? 'Log out? This will forget your identity on this device. You can import your PEM key again.'
+    : 'Log out? This will forget your identity on this device. You can sign back in with the same username + password.';
+  if (confirm(msg)) {
+    hubLogout();
     clearIdentity();
     wallet = { privateKey: null, pubkey: null, identityRef: null, name: null, username: null };
     updateAttestBar();
@@ -1530,9 +1774,103 @@ document.addEventListener('click', async function(e) {
   }
 });
 
+// Toggle between setup and import views
+document.getElementById('btn-show-import').addEventListener('click', function() {
+  showView('view-import');
+  notifyResize();
+});
+document.getElementById('btn-show-setup').addEventListener('click', function() {
+  showView('view-setup');
+  notifyResize();
+});
+
+// Import PEM key
+document.getElementById('btn-import').addEventListener('click', async function() {
+  var btn = this;
+  var pemText = document.getElementById('import-pem').value.trim();
+  var displayName = document.getElementById('import-name').value.trim();
+
+  showError('import-error', '');
+
+  if (!pemText) return showError('import-error', 'Paste your PEM private key');
+  if (pemText.indexOf('PRIVATE KEY') === -1) return showError('import-error', 'Invalid PEM format');
+  if (!displayName) return showError('import-error', 'Display name is required');
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Importing...';
+
+  try {
+    var kp = await importPEM(pemText);
+
+    // Check if identity already exists on hub
+    var existingRef = null;
+    try {
+      var checkUrl = HUB_API + '/search?by=' + encodeURIComponent(kp.pubkeyB64url) + '&type=IDENTITY&limit=1';
+      var checkResp = await fetch(checkUrl, { headers: { 'Accept': 'application/json' } });
+      if (checkResp.ok) {
+        var checkData = await checkResp.json();
+        if (checkData.items && checkData.items.length > 0) {
+          var existing = checkData.items[0];
+          var existingItem = existing.item || existing;
+          existingRef = existingItem.ref || (existingItem.pubkey + '.' + existingItem.id);
+          if (existingItem.content && existingItem.content.name) {
+            displayName = existingItem.content.name;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Hub check failed:', e);
+    }
+
+    var ref;
+    if (existingRef) {
+      ref = existingRef;
+    } else {
+      var identity = await createIdentityObject(kp.pubkeyB64url, kp.privateKey, displayName);
+      ref = identity.ref;
+    }
+
+    // Save to localStorage (no username for imported keys)
+    LS.set('pubkey', kp.pubkeyB64url);
+    LS.set('identity_ref', ref);
+    LS.set('name', displayName);
+    LS.set('auth_mode', 'pem');
+    LS.set('onboarded', '1');
+
+    // Set wallet state
+    wallet.privateKey = kp.privateKey;
+    wallet.pubkey = kp.pubkeyB64url;
+    wallet.identityRef = ref;
+    wallet.name = displayName;
+
+    // Authenticate with hub
+    hubAuthenticate(wallet.privateKey, wallet.pubkey).then(function(result) {
+      if (!result.ok) console.warn('Hub auth after import failed:', result.error);
+      broadcastAuthChanged(false);
+    });
+
+    updateAttestBar();
+    broadcastAuth(false);
+    broadcastAuthChanged(false);
+    showUnlocked();
+  } catch (e) {
+    console.error('PEM import failed:', e);
+    showError('import-error', 'Import failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Import';
+  }
+});
+
 // Enter key shortcuts
 document.getElementById('unlock-pass').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') document.getElementById('btn-unlock').click();
+});
+document.getElementById('unlock-pem').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) document.getElementById('btn-unlock').click();
+});
+document.getElementById('import-pem').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) document.getElementById('btn-import').click();
 });
 document.getElementById('setup-pass2').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') document.getElementById('btn-create').click();

@@ -434,6 +434,127 @@ func TestAuthMiddleware(t *testing.T) {
 	}
 }
 
+func TestHandleLogout(t *testing.T) {
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+
+	priv, pubkey := testKeypair(t)
+
+	// Authenticate first: challenge → token
+	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
+	w := httptest.NewRecorder()
+	auth.HandleChallenge(w, req)
+
+	var challengeResp struct {
+		Challenge string `json:"challenge"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &challengeResp)
+
+	sig := signChallenge(t, priv, challengeResp.Challenge)
+	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"` + sig + `"}`
+	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	auth.HandleToken(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("token exchange: expected 200, got %d", w.Code)
+	}
+
+	var tokenResp struct {
+		Token string `json:"token"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &tokenResp)
+
+	// Verify token is valid before logout
+	if _, ok := auth.ValidateToken(tokenResp.Token); !ok {
+		t.Fatal("token should be valid before logout")
+	}
+
+	// Logout with bearer token
+	req = httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenResp.Token)
+	w = httptest.NewRecorder()
+	auth.HandleLogout(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("logout: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify token is now invalid
+	if _, ok := auth.ValidateToken(tokenResp.Token); ok {
+		t.Error("token should be invalid after logout")
+	}
+
+	// Verify Set-Cookie clears the cookie
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "dv_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected dv_session cookie to be cleared")
+	}
+	if sessionCookie.MaxAge != -1 {
+		t.Errorf("cookie MaxAge should be -1 to clear, got %d", sessionCookie.MaxAge)
+	}
+}
+
+func TestHandleLogoutWithCookie(t *testing.T) {
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+
+	// Directly insert a token
+	auth.mu.Lock()
+	auth.tokens["cookie-token"] = tokenEntry{pubkey: "test-pk", expiresAt: time.Now().Add(1 * time.Hour)}
+	auth.mu.Unlock()
+
+	// Logout with cookie instead of bearer
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "cookie-token"})
+	w := httptest.NewRecorder()
+	auth.HandleLogout(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify token is invalidated
+	if _, ok := auth.ValidateToken("cookie-token"); ok {
+		t.Error("token should be invalid after logout via cookie")
+	}
+}
+
+func TestHandleLogoutUnauthenticated(t *testing.T) {
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+
+	// Logout without any credentials — should still return 200 (idempotent)
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	w := httptest.NewRecorder()
+	auth.HandleLogout(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for no-op logout, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Should still clear the cookie
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "dv_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected dv_session cookie to be cleared even for unauthenticated request")
+	}
+}
+
 func TestTokenExchangeSetsCookie(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
