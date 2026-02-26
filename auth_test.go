@@ -404,4 +404,104 @@ func TestAuthMiddleware(t *testing.T) {
 	if w.Body.String() != "" {
 		t.Errorf("expected empty pubkey for non-Bearer auth, got %q", w.Body.String())
 	}
+
+	// With valid cookie — should populate context
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "test-token"})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Body.String() != "test-pubkey" {
+		t.Errorf("expected 'test-pubkey' from cookie, got %q", w.Body.String())
+	}
+
+	// With invalid cookie — should pass through, no pubkey
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "invalid-token"})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Body.String() != "" {
+		t.Errorf("expected empty pubkey for invalid cookie, got %q", w.Body.String())
+	}
+
+	// Bearer header takes precedence over cookie
+	req = httptest.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "invalid-token"})
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Body.String() != "test-pubkey" {
+		t.Errorf("expected bearer to take precedence, got %q", w.Body.String())
+	}
+}
+
+func TestTokenExchangeSetsCookie(t *testing.T) {
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+
+	priv, pubkey := testKeypair(t)
+
+	// Get challenge
+	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
+	w := httptest.NewRecorder()
+	auth.HandleChallenge(w, req)
+
+	var challengeResp struct {
+		Challenge string `json:"challenge"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &challengeResp)
+
+	// Exchange for token
+	sig := signChallenge(t, priv, challengeResp.Challenge)
+	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"` + sig + `"}`
+	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	auth.HandleToken(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify Set-Cookie header
+	cookies := w.Result().Cookies()
+	var sessionCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == "dv_session" {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("expected dv_session cookie to be set")
+	}
+	if !sessionCookie.HttpOnly {
+		t.Error("cookie should be HttpOnly")
+	}
+	if !sessionCookie.Secure {
+		t.Error("cookie should be Secure")
+	}
+	if sessionCookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie SameSite should be Lax, got %v", sessionCookie.SameSite)
+	}
+	if sessionCookie.MaxAge != int((168 * time.Hour).Seconds()) {
+		t.Errorf("cookie MaxAge should be %d, got %d", int((168*time.Hour).Seconds()), sessionCookie.MaxAge)
+	}
+
+	// Verify the cookie value is a valid token
+	var tokenResp struct {
+		Token string `json:"token"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &tokenResp)
+	if sessionCookie.Value != tokenResp.Token {
+		t.Errorf("cookie value %q should match token %q", sessionCookie.Value, tokenResp.Token)
+	}
+
+	// Verify the cookie token actually works for auth
+	gotPubkey, ok := auth.ValidateToken(sessionCookie.Value)
+	if !ok {
+		t.Fatal("cookie token should be valid")
+	}
+	if gotPubkey != pubkey {
+		t.Errorf("cookie token pubkey: got %q, want %q", gotPubkey, pubkey)
+	}
 }

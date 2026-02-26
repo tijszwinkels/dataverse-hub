@@ -155,6 +155,17 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 	a.tokens[token] = tokenEntry{pubkey: req.Pubkey, expiresAt: expiresAt}
 	a.mu.Unlock()
 
+	// Set session cookie so browsers authenticate transparently
+	http.SetCookie(w, &http.Cookie{
+		Name:     "dv_session",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(a.tokenExpiry.Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"token":      token,
@@ -179,7 +190,11 @@ func (a *AuthStore) ValidateToken(token string) (string, bool) {
 // Does NOT reject unauthenticated requests — handlers decide individually.
 func (a *AuthStore) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if token := extractBearerToken(r); token != "" {
+		token := extractBearerToken(r)
+		if token == "" {
+			token = extractCookieToken(r)
+		}
+		if token != "" {
 			if pubkey, ok := a.ValidateToken(token); ok {
 				ctx := context.WithValue(r.Context(), authPubkeyKey, pubkey)
 				r = r.WithContext(ctx)
@@ -206,6 +221,15 @@ func extractBearerToken(r *http.Request) string {
 		return ""
 	}
 	return strings.TrimPrefix(auth, "Bearer ")
+}
+
+// extractCookieToken pulls the token from the dv_session cookie.
+func extractCookieToken(r *http.Request) string {
+	c, err := r.Cookie("dv_session")
+	if err != nil {
+		return ""
+	}
+	return c.Value
 }
 
 func (a *AuthStore) cleanupLoop() {
