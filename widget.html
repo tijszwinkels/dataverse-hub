@@ -80,6 +80,8 @@ body{
   padding:10px;
   max-width:280px;
   width:100%;
+  max-height:100vh;
+  overflow-y:auto;
 }
 
 /* Cards */
@@ -305,10 +307,10 @@ body.embedded .phrase-verify-warn{font-size:9px}
         <button class="btn-primary" id="btn-create">Sign In</button>
       </div>
     </div>
-    <div class="warn">Your password can never be changed or recovered. It deterministically generates your cryptographic key. Choose wisely.</div>
     <div style="text-align:center;margin-top:8px">
       <button class="btn-link" id="btn-show-import">Import PEM key instead</button>
     </div>
+    <div class="warn">Your password can never be changed or recovered. It deterministically generates your cryptographic key. Choose wisely.</div>
   </div>
 
   <!-- State: Import PEM key -->
