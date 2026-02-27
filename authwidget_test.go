@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAuthWidgetHandler_MatchingHost(t *testing.T) {
@@ -148,6 +149,49 @@ func TestCORSMiddleware_Preflight(t *testing.T) {
 	}
 }
 
+func TestCORSMiddleware_CredentialsHeader(t *testing.T) {
+	cfg := AuthWidgetConfig{
+		AuthHost:       "auth.dataverse001.net",
+		AllowedOrigins: []string{"https://dataverse001.net"},
+	}
+	mw := corsMiddleware(cfg)
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := mw(inner)
+
+	// Regular request with allowed origin
+	req := httptest.NewRequest("GET", "/auth/token", nil)
+	req.Header.Set("Origin", "https://dataverse001.net")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("expected Access-Control-Allow-Credentials: true, got %q", w.Header().Get("Access-Control-Allow-Credentials"))
+	}
+
+	// Preflight also needs credentials
+	req = httptest.NewRequest("OPTIONS", "/auth/token", nil)
+	req.Header.Set("Origin", "https://dataverse001.net")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("expected Access-Control-Allow-Credentials: true on preflight, got %q", w.Header().Get("Access-Control-Allow-Credentials"))
+	}
+
+	// Disallowed origin should NOT get credentials header
+	req = httptest.NewRequest("GET", "/auth/token", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Header().Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatal("disallowed origin should not get credentials header")
+	}
+}
+
 func TestCORSMiddleware_AuthOriginAllowed(t *testing.T) {
 	cfg := AuthWidgetConfig{
 		AuthHost:       "auth.dataverse001.net",
@@ -182,7 +226,9 @@ func TestWidgetRouteInHubRouter(t *testing.T) {
 	limiter := NewRateLimiter(1000, 100000)
 	defer limiter.Stop()
 
-	hub := NewHub(store, index, limiter, "")
+	auth := NewAuthStore(168 * time.Hour)
+	defer auth.Stop()
+	hub := NewHub(store, index, limiter, auth, "")
 	cfg := AuthWidgetConfig{
 		AuthHost:       "auth.dataverse001.net",
 		AllowedOrigins: []string{"https://dataverse001.net"},

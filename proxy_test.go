@@ -22,7 +22,8 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 	rootStore, _ := NewStore(rootDir, true)
 	rootIndex := NewIndex()
 	rootLimiter := NewRateLimiter(10000, 1000000)
-	rootHub := NewHub(rootStore, rootIndex, rootLimiter, "")
+	rootAuth := NewAuthStore(168 * time.Hour)
+	rootHub := NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "")
 	rootSrv := httptest.NewServer(rootHub.Router())
 
 	// Proxy
@@ -30,11 +31,12 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 	proxyStore, _ := NewStore(proxyDir, true)
 	proxyIndex := NewIndex()
 	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyAuth := NewAuthStore(168 * time.Hour)
 	upstream := NewUpstream(rootSrv.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 
 	return proxySrv, rootSrv, func() {
@@ -42,6 +44,8 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 		rootSrv.Close()
 		rootLimiter.Stop()
 		proxyLimiter.Stop()
+		rootAuth.Stop()
+		proxyAuth.Stop()
 	}
 }
 
@@ -197,7 +201,9 @@ func TestProxyPutSyncPendingCreated(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -383,7 +389,9 @@ func TestProxyGet502FallsBackToCache(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -425,7 +433,9 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -476,7 +486,9 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -531,7 +543,9 @@ func TestProxyGet404NotFoundBothSides(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -569,7 +583,9 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, "", upstream, pending)
+	proxyAuth := NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
 
 	// Load fixture and store as rev 28 (the fixture's actual revision)
 	data := loadTestFixture(t, "root.json")

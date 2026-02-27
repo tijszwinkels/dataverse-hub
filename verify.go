@@ -36,8 +36,9 @@ func VerifyEnvelope(data []byte) error {
 	}
 
 	// Check realm membership (supports both old and new format)
+	// Accept objects in dataverse001 or in a pubkey-realm
 	realms := ResolveIn(&env, &item)
-	if !realms.Contains("dataverse001") {
+	if !realms.Contains("dataverse001") && len(PubkeyRealms(realms)) == 0 {
 		return errors.New("missing or wrong 'in' marker")
 	}
 

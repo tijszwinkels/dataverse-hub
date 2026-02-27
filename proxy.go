@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"time"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -18,6 +20,7 @@ type Proxy struct {
 	store            *Store
 	index            *Index
 	limiter          *RateLimiter
+	auth             *AuthStore
 	defaultViewerRef string
 
 	upstream *Upstream
@@ -25,11 +28,12 @@ type Proxy struct {
 }
 
 // NewProxy creates a Proxy with the given components.
-func NewProxy(store *Store, index *Index, limiter *RateLimiter, defaultViewerRef string, upstream *Upstream, pending *SyncPending) *Proxy {
+func NewProxy(store *Store, index *Index, limiter *RateLimiter, auth *AuthStore, defaultViewerRef string, upstream *Upstream, pending *SyncPending) *Proxy {
 	return &Proxy{
 		store:            store,
 		index:            index,
 		limiter:          limiter,
+		auth:             auth,
 		defaultViewerRef: defaultViewerRef,
 		upstream:         upstream,
 		pending:          pending,
@@ -49,10 +53,16 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(p.limiter.Middleware)
+	r.Use(p.auth.Middleware)
 	if cfg.AuthHost != "" {
 		r.Use(corsMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
+
+	// Auth routes
+	r.Get("/auth/challenge", p.auth.HandleChallenge)
+	r.Post("/auth/token", p.auth.HandleToken)
+	r.Post("/auth/logout", p.auth.HandleLogout)
 
 	if cfg.AuthHost != "" {
 		r.Get("/widget", authWidgetHandler(cfg))
@@ -68,7 +78,7 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 
 // handleRoot redirects to the ROOT object from local index.
 func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
-	metas := p.index.GetAll("", "ROOT")
+	metas := p.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
@@ -171,9 +181,19 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	realms := ResolveIn(env, item)
-	if !realms.Contains("dataverse001") {
+	if !realms.Contains("dataverse001") && len(PubkeyRealms(realms)) == 0 {
 		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
 		return
+	}
+
+	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
+	for _, pr := range PubkeyRealms(realms) {
+		if pr != item.Pubkey {
+			writeError(w, http.StatusForbidden,
+				"pubkey-realm does not match item pubkey",
+				"REALM_FORBIDDEN")
+			return
+		}
 	}
 	if ref != item.Ref() {
 		writeError(w, http.StatusBadRequest,
@@ -196,6 +216,12 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Private objects (no dataverse001) are stored locally only — never forwarded to upstream
+	if !IsPublicObject(realms) {
+		p.storePrivateLocally(w, ref, item, canonical, realms)
+		return
+	}
+
 	// Forward to upstream
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.baseURL+"/"+ref, nil)
 	if err != nil {
@@ -209,7 +235,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Upstream unreachable — store locally with sync pending
 		log.Printf("[proxy] WARN: PUT /%s: upstream unreachable, storing locally (sync pending)", ref)
-		p.storeLocallyWithPending(w, ref, item, canonical)
+		p.storeLocallyWithPending(w, ref, item, canonical, realms)
 		return
 	}
 	defer resp.Body.Close()
@@ -225,7 +251,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		// Cache locally
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
-		p.index.Update(ref, item, ts)
+		p.index.Update(ref, item, ts, realms)
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 		w.WriteHeader(resp.StatusCode)
@@ -259,6 +285,7 @@ func (p *Proxy) handleInbound(w http.ResponseWriter, r *http.Request) {
 }
 
 // forwardListEndpoint forwards a list-type request to upstream, falling back to local on failure.
+// When the user is authenticated, merges local private objects into upstream results.
 func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.baseURL+upstreamPath, nil)
 	if err != nil {
@@ -277,17 +304,36 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	}
 	defer resp.Body.Close()
 
-	if isUpstreamDown(resp.StatusCode) {
-		log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
+	if isUpstreamDown(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
+		if resp.StatusCode != http.StatusNotFound {
+			log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
+		}
 		io.Copy(io.Discard, resp.Body)
 		p.serveLocalList(w, r)
 		return
 	}
 
-	// Forward upstream response directly
 	body, _ := io.ReadAll(resp.Body)
-	w.WriteHeader(resp.StatusCode)
-	w.Write(body)
+
+	// If user is not authenticated, forward upstream response as-is (fast path)
+	authPK := AuthPubkey(r)
+	if authPK == "" {
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	// User is authenticated — merge local private objects into upstream results
+	var upstreamResp ListResponse
+	if err := json.Unmarshal(body, &upstreamResp); err != nil {
+		// Can't parse upstream response — forward raw
+		log.Printf("[proxy] WARN: forward %s: parse upstream response: %v", upstreamPath, err)
+		w.WriteHeader(resp.StatusCode)
+		w.Write(body)
+		return
+	}
+
+	p.mergePrivateIntoUpstream(w, r, upstreamResp, authPK)
 }
 
 // serveLocalList serves list/inbound results from the local index (fallback).
@@ -298,6 +344,7 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
+	authPK := AuthPubkey(r)
 	var metas []ObjectMeta
 	if ref != "" {
 		// Inbound
@@ -306,10 +353,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
 		}
-		metas = p.index.GetInbound(ref, filters)
+		metas = p.index.GetInbound(ref, filters, authPK)
 	} else {
 		// Search
-		metas = p.index.GetAll(q.Get("by"), q.Get("type"))
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
 	}
 
 	limit := parseLimit(q.Get("limit"), 50, 200)
@@ -322,6 +369,165 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeList(w, items, nextCursor, hasMore)
+}
+
+// mergePrivateIntoUpstream merges local private objects into an upstream list response.
+// Private objects never exist on upstream, so no dedup is needed. Both sources are sorted
+// by (UpdatedAt DESC, Ref), enabling a standard merge-sort.
+func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp ListResponse, authPK string) {
+	q := r.URL.Query()
+	ref := chi.URLParam(r, "ref")
+	includeInboundCounts := q.Get("include") == "inbound_counts"
+	limit := parseLimit(q.Get("limit"), 50, 200)
+	cursor := parseCursor(q.Get("cursor"))
+
+	// Query local index for objects visible to this user
+	var metas []ObjectMeta
+	if ref != "" {
+		filters := InboundFilters{
+			Relation: q.Get("relation"),
+			From:     q.Get("from"),
+			Type:     q.Get("type"),
+		}
+		metas = p.index.GetInbound(ref, filters, authPK)
+	} else {
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
+	}
+
+	// Filter to private-only objects (upstream already has public ones)
+	privateMetas := make([]ObjectMeta, 0, len(metas))
+	for _, m := range metas {
+		if !m.IsPublic {
+			privateMetas = append(privateMetas, m)
+		}
+	}
+
+	// Fast path: no local private objects — forward upstream response as-is
+	if len(privateMetas) == 0 {
+		writeList(w, upstreamResp.Items, upstreamResp.Cursor, upstreamResp.HasMore)
+		return
+	}
+
+	// Apply cursor to local private metas (skip items before cursor position)
+	if cursor != nil {
+		idx := 0
+		for idx < len(privateMetas) {
+			m := privateMetas[idx]
+			if m.UpdatedAt.Before(cursor.T) || (m.UpdatedAt.Equal(cursor.T) && m.Ref < cursor.Ref) {
+				break
+			}
+			idx++
+		}
+		privateMetas = privateMetas[idx:]
+	}
+
+	// Parse upstream items to extract sort keys
+	type sortableItem struct {
+		data      json.RawMessage
+		ref       string
+		updatedAt time.Time
+	}
+
+	upstreamItems := make([]sortableItem, 0, len(upstreamResp.Items))
+	for _, raw := range upstreamResp.Items {
+		ts, itemRef := extractSortKey(raw)
+		upstreamItems = append(upstreamItems, sortableItem{data: raw, ref: itemRef, updatedAt: ts})
+	}
+
+	// Load local private objects
+	localItems := make([]sortableItem, 0, len(privateMetas))
+	for _, m := range privateMetas {
+		data, err := p.store.Read(m.Ref)
+		if err != nil || data == nil {
+			continue
+		}
+		item := json.RawMessage(data)
+		if m.Type == "BLOB" {
+			item = stripBlobData(item)
+		}
+		localItems = append(localItems, sortableItem{data: item, ref: m.Ref, updatedAt: m.UpdatedAt})
+	}
+
+	// Merge-sort both lists by (UpdatedAt DESC, Ref DESC)
+	merged := make([]sortableItem, 0, len(upstreamItems)+len(localItems))
+	ui, li := 0, 0
+	for ui < len(upstreamItems) && li < len(localItems) {
+		u, l := upstreamItems[ui], localItems[li]
+		// Pick the newer item (DESC order)
+		if u.updatedAt.After(l.updatedAt) || (u.updatedAt.Equal(l.updatedAt) && u.ref >= l.ref) {
+			merged = append(merged, u)
+			ui++
+		} else {
+			merged = append(merged, l)
+			li++
+		}
+	}
+	for ; ui < len(upstreamItems); ui++ {
+		merged = append(merged, upstreamItems[ui])
+	}
+	for ; li < len(localItems); li++ {
+		merged = append(merged, localItems[li])
+	}
+
+	// Apply limit
+	hasMore := upstreamResp.HasMore || len(merged) > limit
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
+
+	// Build result
+	items := make([]json.RawMessage, len(merged))
+	refs := make([]string, len(merged))
+	for i, m := range merged {
+		items[i] = m.data
+		refs[i] = m.ref
+	}
+
+	if includeInboundCounts {
+		items = p.enrichWithInboundCounts(items, refs)
+	}
+
+	// Generate cursor from last merged item
+	var nextCursor *string
+	if hasMore && len(merged) > 0 {
+		last := merged[len(merged)-1]
+		c := Cursor{T: last.updatedAt, Ref: last.ref}
+		encoded, _ := json.Marshal(c)
+		s := encodeBase64Cursor(encoded)
+		nextCursor = &s
+	}
+
+	writeList(w, items, nextCursor, hasMore)
+}
+
+// extractSortKey extracts (UpdatedAt, Ref) from a raw JSON item for merge-sorting.
+func extractSortKey(raw json.RawMessage) (time.Time, string) {
+	// Parse just the fields we need from the envelope
+	var env struct {
+		Item struct {
+			Pubkey    string `json:"pubkey"`
+			ID        string `json:"id"`
+			Ref       string `json:"ref"`
+			UpdatedAt string `json:"updated_at"`
+			CreatedAt string `json:"created_at"`
+		} `json:"item"`
+	}
+	if json.Unmarshal(raw, &env) != nil {
+		return time.Time{}, ""
+	}
+
+	ref := env.Item.Ref
+	if ref == "" && env.Item.Pubkey != "" && env.Item.ID != "" {
+		ref = env.Item.Pubkey + "." + env.Item.ID
+	}
+
+	tsStr := env.Item.UpdatedAt
+	if tsStr == "" {
+		tsStr = env.Item.CreatedAt
+	}
+	ts, _ := time.Parse(time.RFC3339, tsStr)
+
+	return ts, ref
 }
 
 // paginateAndLoad applies cursor/limit to sorted metas, then loads the actual objects.
@@ -524,6 +730,15 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		return
 	}
 
+	// Private object access check
+	if !meta.IsPublic {
+		authPK := AuthPubkey(r)
+		if !HasMatchingRealm(meta.Realms, authPK) {
+			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			return
+		}
+	}
+
 	// Build ETag and check 304 (same logic as Hub.handleGetObject)
 	etag := `"` + strconv.Itoa(meta.Revision) + `"`
 	isHTML := false
@@ -648,8 +863,42 @@ func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 	return p.resolvePageHTML(reqRef, data)
 }
 
+// storePrivateLocally stores a private object locally without forwarding to upstream.
+func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
+	existingMeta, isUpdate := p.index.GetMeta(ref)
+	if isUpdate && existingMeta.Revision >= item.Revision {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
+			"REVISION_CONFLICT")
+		return
+	}
+
+	ts, err := item.Timestamp()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		return
+	}
+
+	if isUpdate {
+		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+			log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		}
+	}
+
+	if err := p.store.Write(ref, canonical, ts); err != nil {
+		log.Printf("[proxy] ERROR: PUT /%s: store write: %v", ref, err)
+		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		return
+	}
+	p.index.Update(ref, item, ts, realms)
+	log.Printf("stored %s rev %d (%s) [private, local-only]", ref, item.Revision, item.Type)
+
+	w.WriteHeader(http.StatusCreated)
+	w.Write(canonical)
+}
+
 // storeLocallyWithPending stores an object locally and adds to sync pending.
-func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *Item, canonical []byte) {
+func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
 	if isUpdate && existingMeta.Revision >= item.Revision {
@@ -685,7 +934,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
-	p.index.Update(ref, item, ts)
+	p.index.Update(ref, item, ts, realms)
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending

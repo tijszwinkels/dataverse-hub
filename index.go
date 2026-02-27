@@ -61,7 +61,7 @@ func (idx *Index) Rebuild(store *Store) (int, time.Duration, error) {
 			continue
 		}
 
-		_, item, err := ParseEnvelope(data)
+		env, item, err := ParseEnvelope(data)
 		if err != nil {
 			log.Printf("WARN: index rebuild parse %s: %v", ref, err)
 			continue
@@ -73,7 +73,8 @@ func (idx *Index) Rebuild(store *Store) (int, time.Duration, error) {
 			ts = time.Time{}
 		}
 
-		idx.addLocked(ref, item, ts)
+		realms := ResolveIn(env, item)
+		idx.addLocked(ref, item, ts, realms)
 		count++
 	}
 
@@ -81,10 +82,10 @@ func (idx *Index) Rebuild(store *Store) (int, time.Duration, error) {
 }
 
 // Add adds or updates an object in the index. Thread-safe.
-func (idx *Index) Add(ref string, item *Item, ts time.Time) {
+func (idx *Index) Add(ref string, item *Item, ts time.Time, realms ...InField) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.addLocked(ref, item, ts)
+	idx.addLocked(ref, item, ts, realms...)
 }
 
 // Remove removes an object from the index. Thread-safe.
@@ -95,15 +96,16 @@ func (idx *Index) Remove(ref string) {
 }
 
 // Update removes old entries and adds new ones. Thread-safe.
-func (idx *Index) Update(ref string, item *Item, ts time.Time) {
+func (idx *Index) Update(ref string, item *Item, ts time.Time, realms ...InField) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	idx.removeLocked(ref)
-	idx.addLocked(ref, item, ts)
+	idx.addLocked(ref, item, ts, realms...)
 }
 
 // GetInbound returns metadata of objects pointing at targetRef, filtered.
-func (idx *Index) GetInbound(targetRef string, filters InboundFilters) []ObjectMeta {
+// authPubkey controls visibility of private objects (empty = public only).
+func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubkey string) []ObjectMeta {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
@@ -115,6 +117,9 @@ func (idx *Index) GetInbound(targetRef string, filters InboundFilters) []ObjectM
 		}
 		m, ok := idx.meta[e.SourceRef]
 		if !ok {
+			continue
+		}
+		if !m.IsPublic && !HasMatchingRealm(m.Realms, authPubkey) {
 			continue
 		}
 		if filters.From != "" && m.Pubkey != filters.From {
@@ -131,7 +136,8 @@ func (idx *Index) GetInbound(targetRef string, filters InboundFilters) []ObjectM
 }
 
 // GetByPubkey returns metadata of objects owned by the given pubkey, optionally filtered by type.
-func (idx *Index) GetByPubkey(pubkey string, typeFilter string) []ObjectMeta {
+// authPubkey controls visibility of private objects (empty = public only).
+func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string) []ObjectMeta {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
@@ -140,6 +146,9 @@ func (idx *Index) GetByPubkey(pubkey string, typeFilter string) []ObjectMeta {
 	for _, ref := range refs {
 		m, ok := idx.meta[ref]
 		if !ok {
+			continue
+		}
+		if !m.IsPublic && !HasMatchingRealm(m.Realms, authPubkey) {
 			continue
 		}
 		if typeFilter != "" && m.Type != typeFilter {
@@ -153,9 +162,10 @@ func (idx *Index) GetByPubkey(pubkey string, typeFilter string) []ObjectMeta {
 }
 
 // GetAll returns all object metadata, optionally filtered by pubkey and/or type.
-func (idx *Index) GetAll(pubkey, typeFilter string) []ObjectMeta {
+// authPubkey controls visibility of private objects (empty = public only).
+func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string) []ObjectMeta {
 	if pubkey != "" {
-		return idx.GetByPubkey(pubkey, typeFilter)
+		return idx.GetByPubkey(pubkey, typeFilter, authPubkey)
 	}
 
 	idx.mu.RLock()
@@ -163,6 +173,9 @@ func (idx *Index) GetAll(pubkey, typeFilter string) []ObjectMeta {
 
 	var result []ObjectMeta
 	for _, m := range idx.meta {
+		if !m.IsPublic && !HasMatchingRealm(m.Realms, authPubkey) {
+			continue
+		}
 		if typeFilter != "" && m.Type != typeFilter {
 			continue
 		}
@@ -194,7 +207,8 @@ func (idx *Index) GetInboundCounts(targetRef string) map[string]int {
 }
 
 // addLocked adds to all index maps. Caller must hold write lock.
-func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
+// realms is the resolved InField (from envelope+item); if nil, falls back to item.In.
+func (idx *Index) addLocked(ref string, item *Item, ts time.Time, realms ...InField) {
 	// Extract mime_type for BLOB objects (used for content negotiation)
 	var mimeType string
 	if item.Type == "BLOB" && item.Content != nil {
@@ -214,6 +228,14 @@ func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 		}
 	}
 
+	// Resolve realms for visibility
+	var resolved InField
+	if len(realms) > 0 && len(realms[0]) > 0 {
+		resolved = realms[0]
+	} else {
+		resolved = item.In
+	}
+
 	// Meta
 	idx.meta[ref] = ObjectMeta{
 		Ref:             ref,
@@ -223,6 +245,8 @@ func (idx *Index) addLocked(ref string, item *Item, ts time.Time) {
 		HasPageRelation: pageRef != "",
 		PageRef:         pageRef,
 		MimeType:        mimeType,
+		IsPublic:        IsPublicObject(resolved),
+		Realms:          []string(resolved),
 		UpdatedAt:       ts,
 	}
 

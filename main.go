@@ -32,6 +32,10 @@ func main() {
 	limiter := NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
+	auth := NewAuthStore(cfg.AuthTokenExpiry)
+	defer auth.Stop()
+	log.Printf("Auth enabled (token expiry: %v)", cfg.AuthTokenExpiry)
+
 	var handler http.Handler
 	var proxyCleanup []func() // cleanup functions for proxy mode
 
@@ -47,7 +51,7 @@ func main() {
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
-		hub := NewHub(store, index, limiter, cfg.DefaultViewerRef)
+		hub := NewHub(store, index, limiter, auth, cfg.DefaultViewerRef)
 		handler = hub.RouterWithAuthWidget(awCfg)
 
 	default: // "proxy" is the default
@@ -69,7 +73,7 @@ func main() {
 		pending.Start()
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
-		proxy := NewProxy(store, index, limiter, cfg.DefaultViewerRef, upstream, pending)
+		proxy := NewProxy(store, index, limiter, auth, cfg.DefaultViewerRef, upstream, pending)
 		handler = proxy.RouterWithAuthWidget(awCfg)
 	}
 
