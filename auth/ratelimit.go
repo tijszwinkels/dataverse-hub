@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"net/http"
@@ -9,12 +9,12 @@ import (
 
 // RateLimiter tracks per-IP request counts with two windows (per-minute, per-day).
 type RateLimiter struct {
-	mu         sync.Mutex
-	perMin     map[string]*window
-	perDay     map[string]*window
-	maxPerMin  int
-	maxPerDay  int
-	stopClean  chan struct{}
+	mu        sync.Mutex
+	perMin    map[string]*window
+	perDay    map[string]*window
+	maxPerMin int
+	maxPerDay int
+	stopClean chan struct{}
 }
 
 type window struct {

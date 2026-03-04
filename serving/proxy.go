@@ -1,4 +1,4 @@
-package main
+package serving
 
 import (
 	"encoding/base64"
@@ -10,6 +10,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/realm"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/upstream"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -17,36 +22,36 @@ import (
 // Proxy is a caching proxy that forwards requests to an upstream root hub
 // while maintaining a local store for offline resilience.
 type Proxy struct {
-	store            *Store
-	index            *Index
-	limiter          *RateLimiter
-	auth             *AuthStore
+	store            *storage.Store
+	index            *storage.Index
+	limiter          *auth.RateLimiter
+	auth             *auth.AuthStore
 	defaultViewerRef string
 
-	upstream *Upstream
-	pending  *SyncPending
+	upstream *upstream.Client
+	pending  *upstream.SyncPending
 }
 
 // NewProxy creates a Proxy with the given components.
-func NewProxy(store *Store, index *Index, limiter *RateLimiter, auth *AuthStore, defaultViewerRef string, upstream *Upstream, pending *SyncPending) *Proxy {
+func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string, up *upstream.Client, pending *upstream.SyncPending) *Proxy {
 	return &Proxy{
 		store:            store,
 		index:            index,
 		limiter:          limiter,
 		auth:             auth,
 		defaultViewerRef: defaultViewerRef,
-		upstream:         upstream,
+		upstream:         up,
 		pending:          pending,
 	}
 }
 
 // Router returns the chi router with proxy handlers and middleware.
 func (p *Proxy) Router() http.Handler {
-	return p.RouterWithAuthWidget(AuthWidgetConfig{})
+	return p.RouterWithAuthWidget(auth.WidgetConfig{})
 }
 
 // RouterWithAuthWidget returns the chi router with auth widget support.
-func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
+func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
@@ -55,7 +60,7 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Use(p.limiter.Middleware)
 	r.Use(p.auth.Middleware)
 	if cfg.AuthHost != "" {
-		r.Use(corsMiddleware(cfg))
+		r.Use(auth.CORSMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
 
@@ -65,7 +70,7 @@ func (p *Proxy) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Post("/auth/logout", p.auth.HandleLogout)
 
 	if cfg.AuthHost != "" {
-		r.Get("/widget", authWidgetHandler(cfg))
+		r.Get("/widget", auth.WidgetHandler(cfg))
 	}
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
@@ -94,7 +99,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	clientETag := r.Header.Get("If-None-Match")
 	upstreamETag := p.buildUpstreamETag(ref)
 
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.baseURL+"/"+ref, nil)
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: GET /%s: build request: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
@@ -126,7 +131,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
 			return
 		}
-		p.cacheLocally(ref, body)
+		p.CacheLocally(ref, body)
 
 	case http.StatusNotFound:
 		localData, _ := p.store.Read(ref)
@@ -138,7 +143,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		go p.pushToUpstream(ref, localData)
 
 	default:
-		if isUpstreamDown(resp.StatusCode) {
+		if upstream.IsDown(resp.StatusCode) {
 			log.Printf("[proxy] WARN: GET /%s: upstream returned %d, falling back to cache", ref, resp.StatusCode)
 			io.Copy(io.Discard, resp.Body)
 			p.serveFromLocalCache(w, r, ref, clientETag)
@@ -175,19 +180,19 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse and validate locally first
-	env, item, err := ParseEnvelope(body)
+	env, item, err := object.ParseEnvelope(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
 		return
 	}
-	realms := ResolveIn(env, item)
-	if !realms.Contains("dataverse001") && len(PubkeyRealms(realms)) == 0 {
+	realms := object.ResolveIn(env, item)
+	if !realms.Contains("dataverse001") && len(object.PubkeyRealms(realms)) == 0 {
 		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
 		return
 	}
 
 	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
-	for _, pr := range PubkeyRealms(realms) {
+	for _, pr := range object.PubkeyRealms(realms) {
 		if pr != item.Pubkey {
 			writeError(w, http.StatusForbidden,
 				"pubkey-realm does not match item pubkey",
@@ -203,13 +208,13 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Local signature verification
-	if err := VerifyEnvelope(body); err != nil {
+	if err := object.VerifyEnvelope(body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
 		return
 	}
 
 	// Canonicalize
-	canonical, err := canonicalJSON(body)
+	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: canonical JSON: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
@@ -217,13 +222,13 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Private objects (no dataverse001) are stored locally only — never forwarded to upstream
-	if !IsPublicObject(realms) {
+	if !realm.IsPublicObject(realms) {
 		p.storePrivateLocally(w, ref, item, canonical, realms)
 		return
 	}
 
 	// Forward to upstream
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.baseURL+"/"+ref, nil)
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: build request: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
@@ -287,7 +292,7 @@ func (p *Proxy) handleInbound(w http.ResponseWriter, r *http.Request) {
 // forwardListEndpoint forwards a list-type request to upstream, falling back to local on failure.
 // When the user is authenticated, merges local private objects into upstream results.
 func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upstreamPath string) {
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.baseURL+upstreamPath, nil)
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+upstreamPath, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: forward %s: build request: %v", upstreamPath, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
@@ -304,7 +309,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	}
 	defer resp.Body.Close()
 
-	if isUpstreamDown(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
+	if upstream.IsDown(resp.StatusCode) || resp.StatusCode == http.StatusNotFound {
 		if resp.StatusCode != http.StatusNotFound {
 			log.Printf("[proxy] WARN: upstream returned %d for %s, falling back to local index", resp.StatusCode, upstreamPath)
 		}
@@ -316,7 +321,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	body, _ := io.ReadAll(resp.Body)
 
 	// If user is not authenticated, forward upstream response as-is (fast path)
-	authPK := AuthPubkey(r)
+	authPK := auth.AuthPubkey(r)
 	if authPK == "" {
 		w.WriteHeader(resp.StatusCode)
 		w.Write(body)
@@ -324,7 +329,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	}
 
 	// User is authenticated — merge local private objects into upstream results
-	var upstreamResp ListResponse
+	var upstreamResp object.ListResponse
 	if err := json.Unmarshal(body, &upstreamResp); err != nil {
 		// Can't parse upstream response — forward raw
 		log.Printf("[proxy] WARN: forward %s: parse upstream response: %v", upstreamPath, err)
@@ -344,11 +349,11 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
-	authPK := AuthPubkey(r)
-	var metas []ObjectMeta
+	authPK := auth.AuthPubkey(r)
+	var metas []object.ObjectMeta
 	if ref != "" {
 		// Inbound
-		filters := InboundFilters{
+		filters := storage.InboundFilters{
 			Relation: q.Get("relation"),
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
@@ -362,10 +367,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
 
-	items, refs, nextCursor, hasMore := p.paginateAndLoad(metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(p.store,metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = p.enrichWithInboundCounts(items, refs)
+		items = enrichWithInboundCounts(p.index,items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
@@ -374,7 +379,7 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 // mergePrivateIntoUpstream merges local private objects into an upstream list response.
 // Private objects never exist on upstream, so no dedup is needed. Both sources are sorted
 // by (UpdatedAt DESC, Ref), enabling a standard merge-sort.
-func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp ListResponse, authPK string) {
+func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp object.ListResponse, authPK string) {
 	q := r.URL.Query()
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
@@ -382,9 +387,9 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 	cursor := parseCursor(q.Get("cursor"))
 
 	// Query local index for objects visible to this user
-	var metas []ObjectMeta
+	var metas []object.ObjectMeta
 	if ref != "" {
-		filters := InboundFilters{
+		filters := storage.InboundFilters{
 			Relation: q.Get("relation"),
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
@@ -395,7 +400,7 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Filter to private-only objects (upstream already has public ones)
-	privateMetas := make([]ObjectMeta, 0, len(metas))
+	privateMetas := make([]object.ObjectMeta, 0, len(metas))
 	for _, m := range metas {
 		if !m.IsPublic {
 			privateMetas = append(privateMetas, m)
@@ -484,14 +489,14 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 	}
 
 	if includeInboundCounts {
-		items = p.enrichWithInboundCounts(items, refs)
+		items = enrichWithInboundCounts(p.index,items, refs)
 	}
 
 	// Generate cursor from last merged item
 	var nextCursor *string
 	if hasMore && len(merged) > 0 {
 		last := merged[len(merged)-1]
-		c := Cursor{T: last.updatedAt, Ref: last.ref}
+		c := object.Cursor{T: last.updatedAt, Ref: last.ref}
 		encoded, _ := json.Marshal(c)
 		s := encodeBase64Cursor(encoded)
 		nextCursor = &s
@@ -530,75 +535,11 @@ func extractSortKey(raw json.RawMessage) (time.Time, string) {
 	return ts, ref
 }
 
-// paginateAndLoad applies cursor/limit to sorted metas, then loads the actual objects.
-func (p *Proxy) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]json.RawMessage, []string, *string, bool) {
-	// Reuse the same logic as Hub — identical pagination
-	if cursor != nil {
-		idx := 0
-		for idx < len(metas) {
-			m := metas[idx]
-			if m.UpdatedAt.Before(cursor.T) || (m.UpdatedAt.Equal(cursor.T) && m.Ref < cursor.Ref) {
-				break
-			}
-			idx++
-		}
-		metas = metas[idx:]
-	}
-
-	hasMore := len(metas) > limit
-	if hasMore {
-		metas = metas[:limit]
-	}
-
-	var items []json.RawMessage
-	var refs []string
-	for _, m := range metas {
-		data, err := p.store.Read(m.Ref)
-		if err != nil || data == nil {
-			continue
-		}
-		item := json.RawMessage(data)
-		if m.Type == "BLOB" {
-			item = stripBlobData(item)
-		}
-		items = append(items, item)
-		refs = append(refs, m.Ref)
-	}
-
-	var nextCursor *string
-	if hasMore && len(metas) > 0 {
-		last := metas[len(metas)-1]
-		c := Cursor{T: last.UpdatedAt, Ref: last.Ref}
-		encoded, _ := json.Marshal(c)
-		s := encodeBase64Cursor(encoded)
-		nextCursor = &s
-	}
-
-	return items, refs, nextCursor, hasMore
-}
-
-// enrichWithInboundCounts adds _inbound_counts to each item.
-func (p *Proxy) enrichWithInboundCounts(items []json.RawMessage, refs []string) []json.RawMessage {
-	enriched := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		counts := p.index.GetInboundCounts(refs[i])
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(item, &obj); err != nil {
-			enriched[i] = item
-			continue
-		}
-		countsJSON, _ := json.Marshal(counts)
-		obj["_inbound_counts"] = countsJSON
-		result, _ := json.Marshal(obj)
-		enriched[i] = result
-	}
-	return enriched
-}
 
 // cacheLocally stores an object in the local store and updates the index.
 // Refuses to downgrade: if local has a newer revision, pushes local to upstream instead.
-func (p *Proxy) cacheLocally(ref string, data []byte) {
-	_, item, err := ParseEnvelope(data)
+func (p *Proxy) CacheLocally(ref string, data []byte) {
+	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		log.Printf("[proxy] WARN: cache %s: parse: %v", ref, err)
 		return
@@ -636,7 +577,7 @@ func (p *Proxy) cacheLocally(ref string, data []byte) {
 func (p *Proxy) ensureFresh(ref string) {
 	upstreamETag := p.buildUpstreamETag(ref)
 
-	req, err := http.NewRequest(http.MethodGet, p.upstream.baseURL+"/"+ref, nil)
+	req, err := http.NewRequest(http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		return
 	}
@@ -659,7 +600,7 @@ func (p *Proxy) ensureFresh(ref string) {
 		if err != nil {
 			return
 		}
-		p.cacheLocally(ref, body)
+		p.CacheLocally(ref, body)
 	case http.StatusNotFound:
 		if data, err := p.store.Read(ref); err == nil && data != nil {
 			go p.pushToUpstream(ref, data)
@@ -676,7 +617,7 @@ func (p *Proxy) ensurePageDepsFresh(ref string) {
 	if err != nil || data == nil {
 		return
 	}
-	_, item, err := ParseEnvelope(data)
+	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		return
 	}
@@ -688,7 +629,7 @@ func (p *Proxy) ensurePageDepsFresh(ref string) {
 
 	// Has a page relation — sync that ref
 	if pageRels, ok := item.Relations["page"]; ok && len(pageRels) > 0 {
-		var rel RelationRef
+		var rel object.RelationRef
 		if json.Unmarshal(pageRels[0], &rel) == nil && rel.Ref != "" {
 			p.ensureFresh(rel.Ref)
 			return
@@ -732,8 +673,8 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 
 	// Private object access check
 	if !meta.IsPublic {
-		authPK := AuthPubkey(r)
-		if !HasMatchingRealm(meta.Realms, authPK) {
+		authPK := auth.AuthPubkey(r)
+		if !realm.HasMatchingRealm(meta.Realms, authPK) {
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -781,7 +722,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
 	// Set ETag from the data if not already set
 	if w.Header().Get("ETag") == "" {
-		_, item, err := ParseEnvelope(data)
+		_, item, err := object.ParseEnvelope(data)
 		if err == nil {
 			etag := `"` + strconv.Itoa(item.Revision) + `"`
 			if acceptsHTML(r) {
@@ -821,7 +762,7 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 // resolvePageHTML extracts HTML from a PAGE object or follows a page relation.
 // Only reads from local store — all upstream syncing must be done beforehand.
 func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
-	_, item, err := ParseEnvelope(data)
+	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		return ""
 	}
@@ -835,7 +776,7 @@ func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	if !ok || len(pageRels) == 0 {
 		return ""
 	}
-	var rel RelationRef
+	var rel object.RelationRef
 	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
 		return ""
 	}
@@ -844,7 +785,7 @@ func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 		log.Printf("[proxy] GET /%s: page relation %s not in local store", reqRef, rel.Ref)
 		return ""
 	}
-	_, pageItem, err := ParseEnvelope(pageData)
+	_, pageItem, err := object.ParseEnvelope(pageData)
 	if err != nil || pageItem.Type != "PAGE" {
 		return ""
 	}
@@ -864,7 +805,7 @@ func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 }
 
 // storePrivateLocally stores a private object locally without forwarding to upstream.
-func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
+func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField) {
 	existingMeta, isUpdate := p.index.GetMeta(ref)
 	if isUpdate && existingMeta.Revision >= item.Revision {
 		writeError(w, http.StatusConflict,
@@ -898,7 +839,7 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *Ite
 }
 
 // storeLocallyWithPending stores an object locally and adds to sync pending.
-func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *Item, canonical []byte, realms InField) {
+func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField) {
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
 	if isUpdate && existingMeta.Revision >= item.Revision {
@@ -948,7 +889,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 // pushToUpstream PUTs a local object to upstream (fire-and-forget).
 // Used when we discover upstream is missing an object we have locally.
 func (p *Proxy) pushToUpstream(ref string, data []byte) {
-	req, err := http.NewRequest(http.MethodPut, p.upstream.baseURL+"/"+ref, nil)
+	req, err := http.NewRequest(http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] WARN: push %s: build request: %v", ref, err)
 		return
@@ -972,7 +913,7 @@ func (p *Proxy) pushToUpstream(ref string, data []byte) {
 // fetchAndCacheFromUpstream GETs an object from upstream and caches it locally.
 // Used after a PUT 409 conflict to get the newer version.
 func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
-	req, err := http.NewRequest(http.MethodGet, p.upstream.baseURL+"/"+ref, nil)
+	req, err := http.NewRequest(http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] WARN: fetch-after-conflict %s: build request: %v", ref, err)
 		return
@@ -996,17 +937,9 @@ func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
 		log.Printf("[proxy] WARN: fetch-after-conflict %s: read body: %v", ref, err)
 		return
 	}
-	p.cacheLocally(ref, body)
+	p.CacheLocally(ref, body)
 }
 
-// isUpstreamDown returns true for HTTP status codes that indicate the upstream
-// server is down (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
-// These warrant a fallback to the local cache rather than forwarding to the client.
-func isUpstreamDown(statusCode int) bool {
-	return statusCode == http.StatusBadGateway ||
-		statusCode == http.StatusServiceUnavailable ||
-		statusCode == http.StatusGatewayTimeout
-}
 
 // encodeBase64Cursor encodes cursor bytes as base64url.
 func encodeBase64Cursor(data []byte) string {

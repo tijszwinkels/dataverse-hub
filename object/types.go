@@ -1,6 +1,7 @@
-package main
+package object
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -48,16 +49,16 @@ type Envelope struct {
 
 // Item is the parsed inner object.
 type Item struct {
-	In          InField                     `json:"in,omitempty"`
-	ID          string                      `json:"id"`
-	Pubkey      string                      `json:"pubkey"`
-	CreatedAt   string                      `json:"created_at"`
-	UpdatedAt   string                      `json:"updated_at,omitempty"`
-	Revision    int                         `json:"revision,omitempty"`
-	Type        string                      `json:"type,omitempty"`
-	Instruction string                      `json:"instruction,omitempty"`
+	In          InField                      `json:"in,omitempty"`
+	ID          string                       `json:"id"`
+	Pubkey      string                       `json:"pubkey"`
+	CreatedAt   string                       `json:"created_at"`
+	UpdatedAt   string                       `json:"updated_at,omitempty"`
+	Revision    int                          `json:"revision,omitempty"`
+	Type        string                       `json:"type,omitempty"`
+	Instruction string                       `json:"instruction,omitempty"`
 	Relations   map[string][]json.RawMessage `json:"relations,omitempty"`
-	Content     json.RawMessage             `json:"content,omitempty"`
+	Content     json.RawMessage              `json:"content,omitempty"`
 }
 
 // ResolveIn returns the authoritative realm list for an envelope+item pair.
@@ -131,18 +132,26 @@ type APIError struct {
 	Code  string `json:"code"`
 }
 
-// Config holds server configuration.
-type Config struct {
-	Mode             string // "root" or "proxy" (default: "proxy")
-	UpstreamURL      string // upstream hub URL, only used in proxy mode
-	Addr             string
-	StoreDir         string
-	RateLimitPerMin  int
-	RateLimitPerDay  int
-	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
-	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
+// IsPubkeyRealm checks if a realm string looks like a compressed P-256 pubkey.
+// Must be 44-char base64url that decodes to 33 bytes starting with 0x02 or 0x03.
+func IsPubkeyRealm(realm string) bool {
+	if len(realm) != 44 {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(realm)
+	if err != nil || len(raw) != 33 {
+		return false
+	}
+	return raw[0] == 0x02 || raw[0] == 0x03
+}
 
-	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
-	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
-	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
+// PubkeyRealms returns all pubkey-realm strings from a realm list.
+func PubkeyRealms(realms InField) []string {
+	var result []string
+	for _, r := range realms {
+		if IsPubkeyRealm(r) {
+			result = append(result, r)
+		}
+	}
+	return result
 }

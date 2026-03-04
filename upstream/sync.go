@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"bytes"
@@ -11,22 +11,25 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/storage"
 )
 
 // SyncPending manages a folder of objects that failed to push to upstream
 // and need to be retried when connectivity is restored.
 type SyncPending struct {
 	dir      string
-	upstream *Upstream
-	store    *Store
-	index    *Index
+	upstream *Client
+	store    *storage.Store
+	index    *storage.Index
 
 	stop chan struct{}
 	wg   sync.WaitGroup
 }
 
 // NewSyncPending creates a sync pending manager. Creates the directory if needed.
-func NewSyncPending(dir string, upstream *Upstream, store *Store, index *Index) *SyncPending {
+func NewSyncPending(dir string, upstream *Client, store *storage.Store, index *storage.Index) *SyncPending {
 	os.MkdirAll(dir, 0755)
 	return &SyncPending{
 		dir:      dir,
@@ -257,7 +260,7 @@ func (sp *SyncPending) fetchAndCache(ref string) {
 		return
 	}
 
-	_, item, err := ParseEnvelope(data)
+	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		log.Printf("[proxy] WARN: sync fetch parse %s: %v", ref, err)
 		return

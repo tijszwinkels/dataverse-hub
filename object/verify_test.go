@@ -1,4 +1,4 @@
-package main
+package object
 
 import (
 	"encoding/json"
@@ -195,7 +195,7 @@ func TestCanonicalJSON(t *testing.T) {
 	input := `{"z":1,"a":2,"m":{"b":1,"a":2}}`
 	expected := `{"a":2,"m":{"a":2,"b":1},"z":1}`
 
-	result, err := canonicalJSON([]byte(input))
+	result, err := CanonicalJSON([]byte(input))
 	if err != nil {
 		t.Fatal(err)
 	}

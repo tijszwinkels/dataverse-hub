@@ -1,4 +1,4 @@
-package main
+package object
 
 import "testing"
 
@@ -37,30 +37,6 @@ func TestIsPubkeyRealm(t *testing.T) {
 	}
 }
 
-func TestIsPublicObject(t *testing.T) {
-	tests := []struct {
-		name   string
-		realms InField
-		want   bool
-	}{
-		{"has dataverse001", InField{"dataverse001"}, true},
-		{"only pubkey realm", InField{"AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"}, false},
-		{"both dataverse001 and pubkey", InField{"dataverse001", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"}, true},
-		{"empty", InField{}, false},
-		{"nil", nil, false},
-		{"other realm only", InField{"acme_internal"}, false},
-		{"dataverse001 and other", InField{"dataverse001", "acme_internal"}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsPublicObject(tt.realms)
-			if got != tt.want {
-				t.Errorf("IsPublicObject(%v) = %v, want %v", tt.realms, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestPubkeyRealms(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -83,32 +59,6 @@ func TestPubkeyRealms(t *testing.T) {
 				if got[i] != tt.want[i] {
 					t.Errorf("PubkeyRealms(%v)[%d] = %q, want %q", tt.realms, i, got[i], tt.want[i])
 				}
-			}
-		})
-	}
-}
-
-func TestHasMatchingRealm(t *testing.T) {
-	pk := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"
-	otherPk := "A6yU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"
-
-	tests := []struct {
-		name       string
-		realms     []string
-		authPubkey string
-		want       bool
-	}{
-		{"matching pubkey in realms", []string{pk}, pk, true},
-		{"no match", []string{pk}, otherPk, false},
-		{"empty pubkey", []string{pk}, "", false},
-		{"empty realms", nil, pk, false},
-		{"mixed realms with match", []string{"dataverse001", pk}, pk, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := HasMatchingRealm(tt.realms, tt.authPubkey)
-			if got != tt.want {
-				t.Errorf("HasMatchingRealm(%v, %q) = %v, want %v", tt.realms, tt.authPubkey, got, tt.want)
 			}
 		})
 	}

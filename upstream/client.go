@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"bytes"
@@ -12,10 +12,10 @@ import (
 	"time"
 )
 
-// Upstream is an HTTP client for talking to the root hub server.
+// Client is an HTTP client for talking to the root hub server.
 // Tracks availability: when the upstream is marked down, Do() fast-fails
 // and a background health-checker probes periodically to detect recovery.
-type Upstream struct {
+type Client struct {
 	baseURL   string
 	client    *http.Client
 	available atomic.Bool
@@ -24,9 +24,9 @@ type Upstream struct {
 	doneCh chan struct{}
 }
 
-// NewUpstream creates a new upstream client pointing at the given base URL.
-func NewUpstream(baseURL string) *Upstream {
-	u := &Upstream{
+// NewClient creates a new upstream client pointing at the given base URL.
+func NewClient(baseURL string) *Client {
+	u := &Client{
 		baseURL: baseURL,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
@@ -45,13 +45,18 @@ func NewUpstream(baseURL string) *Upstream {
 }
 
 // Available returns whether the upstream is currently reachable.
-func (u *Upstream) Available() bool {
+func (u *Client) Available() bool {
 	return u.available.Load()
 }
 
 // SetAvailable explicitly sets the availability flag.
-func (u *Upstream) SetAvailable(v bool) {
+func (u *Client) SetAvailable(v bool) {
 	u.available.Store(v)
+}
+
+// BaseURL returns the upstream's base URL.
+func (u *Client) BaseURL() string {
+	return u.baseURL
 }
 
 // Do executes an HTTP request against the upstream.
@@ -59,7 +64,7 @@ func (u *Upstream) SetAvailable(v bool) {
 // On transport errors, marks the upstream as unavailable (the background
 // health-checker will detect recovery).
 // HTTP error responses (4xx, 5xx) are returned as-is without retry.
-func (u *Upstream) Do(req *http.Request, bodyBytes []byte) (*http.Response, error) {
+func (u *Client) Do(req *http.Request, bodyBytes []byte) (*http.Response, error) {
 	if !u.available.Load() {
 		return nil, fmt.Errorf("upstream unavailable (fast-fail)")
 	}
@@ -83,7 +88,7 @@ func (u *Upstream) Do(req *http.Request, bodyBytes []byte) (*http.Response, erro
 
 // HealthCheck performs a lightweight HEAD request to check upstream availability.
 // Returns an error if the upstream is unreachable or returns a gateway error (502/503/504).
-func (u *Upstream) HealthCheck() error {
+func (u *Client) HealthCheck() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -99,7 +104,7 @@ func (u *Upstream) HealthCheck() error {
 	}
 	resp.Body.Close()
 
-	if isUpstreamDown(resp.StatusCode) {
+	if IsDown(resp.StatusCode) {
 		u.available.Store(false)
 		return fmt.Errorf("health check: upstream returned %d", resp.StatusCode)
 	}
@@ -110,7 +115,7 @@ func (u *Upstream) HealthCheck() error {
 
 // StartHealthChecker runs a background goroutine that probes the upstream
 // every interval. Call Stop() to terminate it.
-func (u *Upstream) StartHealthChecker(interval time.Duration) {
+func (u *Client) StartHealthChecker(interval time.Duration) {
 	go func() {
 		defer close(u.doneCh)
 		ticker := time.NewTicker(interval)
@@ -136,7 +141,7 @@ func (u *Upstream) StartHealthChecker(interval time.Duration) {
 }
 
 // Stop terminates the background health-checker and waits for it to finish.
-func (u *Upstream) Stop() {
+func (u *Client) Stop() {
 	select {
 	case <-u.stopCh:
 		// already closed
@@ -144,4 +149,13 @@ func (u *Upstream) Stop() {
 		close(u.stopCh)
 	}
 	<-u.doneCh
+}
+
+// IsDown returns true for HTTP status codes that indicate the upstream
+// server is down (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
+// These warrant a fallback to the local cache rather than forwarding to the client.
+func IsDown(statusCode int) bool {
+	return statusCode == http.StatusBadGateway ||
+		statusCode == http.StatusServiceUnavailable ||
+		statusCode == http.StatusGatewayTimeout
 }

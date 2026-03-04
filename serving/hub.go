@@ -1,34 +1,36 @@
-package main
+package serving
 
 import (
 	"net/http"
 
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/storage"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Hub ties together the store, index, rate limiter, and auth.
 type Hub struct {
-	store            *Store
-	index            *Index
-	limiter          *RateLimiter
-	auth             *AuthStore
+	store            *storage.Store
+	index            *storage.Index
+	limiter          *auth.RateLimiter
+	auth             *auth.AuthStore
 	defaultViewerRef string
 }
 
 // NewHub creates a Hub with the given components.
-func NewHub(store *Store, index *Index, limiter *RateLimiter, auth *AuthStore, defaultViewerRef string) *Hub {
+func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string) *Hub {
 	return &Hub{store: store, index: index, limiter: limiter, auth: auth, defaultViewerRef: defaultViewerRef}
 }
 
 // Router returns the chi router with all routes and middleware.
 func (h *Hub) Router() http.Handler {
-	return h.RouterWithAuthWidget(AuthWidgetConfig{})
+	return h.RouterWithAuthWidget(auth.WidgetConfig{})
 }
 
 // RouterWithAuthWidget returns the chi router with auth widget support.
 // If cfg.AuthHost is empty, the widget route and CORS middleware are skipped.
-func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
+func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
@@ -37,7 +39,7 @@ func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Use(h.limiter.Middleware)
 	r.Use(h.auth.Middleware)
 	if cfg.AuthHost != "" {
-		r.Use(corsMiddleware(cfg))
+		r.Use(auth.CORSMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
 
@@ -47,7 +49,7 @@ func (h *Hub) RouterWithAuthWidget(cfg AuthWidgetConfig) http.Handler {
 	r.Post("/auth/logout", h.auth.HandleLogout)
 
 	if cfg.AuthHost != "" {
-		r.Get("/widget", authWidgetHandler(cfg))
+		r.Get("/widget", auth.WidgetHandler(cfg))
 	}
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)

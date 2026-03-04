@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"io"
@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-// AuthWidgetConfig configures the auth widget module.
-type AuthWidgetConfig struct {
+// WidgetConfig configures the auth widget module.
+type WidgetConfig struct {
 	// AuthHost is the hostname for the auth widget (e.g. "auth.dataverse001.net").
 	AuthHost string
 	// AllowedOrigins are origins that may embed the widget and call the hub API.
@@ -15,9 +15,9 @@ type AuthWidgetConfig struct {
 	AllowedOrigins []string
 }
 
-// authWidgetHandler returns an http.HandlerFunc that serves the widget HTML.
+// WidgetHandler returns an http.HandlerFunc that serves the widget HTML.
 // It only responds when the Host header matches AuthHost or the path is /widget.
-func authWidgetHandler(cfg AuthWidgetConfig) http.HandlerFunc {
+func WidgetHandler(cfg WidgetConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		host := strings.Split(r.Host, ":")[0]
 		if host != cfg.AuthHost {
@@ -31,10 +31,10 @@ func authWidgetHandler(cfg AuthWidgetConfig) http.HandlerFunc {
 	}
 }
 
-// corsMiddleware adds CORS headers for the auth widget origin.
+// CORSMiddleware adds CORS headers for the auth widget origin.
 // The widget on auth.dataverse001.net needs to make API calls
 // (GET, PUT) back to dataverse001.net.
-func corsMiddleware(cfg AuthWidgetConfig) func(http.Handler) http.Handler {
+func CORSMiddleware(cfg WidgetConfig) func(http.Handler) http.Handler {
 	allowed := make(map[string]bool)
 	for _, o := range cfg.AllowedOrigins {
 		allowed[o] = true

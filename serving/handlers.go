@@ -1,4 +1,4 @@
-package main
+package serving
 
 import (
 	"encoding/base64"
@@ -10,6 +10,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/realm"
+	"github.com/dataverse/hub/storage"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -50,8 +54,8 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 	// Private object access control: return 404 (not 403) to avoid leaking existence
 	if !meta.IsPublic {
-		authPK := AuthPubkey(r)
-		if !HasMatchingRealm(meta.Realms, authPK) {
+		authPK := auth.AuthPubkey(r)
+		if !realm.HasMatchingRealm(meta.Realms, authPK) {
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -149,18 +153,18 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse envelope and item
-	env, item, err := ParseEnvelope(body)
+	env, item, err := object.ParseEnvelope(body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
 		return
 	}
 
 	// Resolve realms (supports both old and new format)
-	realms := ResolveIn(env, item)
+	realms := object.ResolveIn(env, item)
 
 	// Validate pubkey-realms: each must match item.pubkey
 	for _, realm := range realms {
-		if IsPubkeyRealm(realm) && realm != item.Pubkey {
+		if object.IsPubkeyRealm(realm) && realm != item.Pubkey {
 			writeError(w, http.StatusForbidden,
 				"pubkey-realm does not match item pubkey", "REALM_FORBIDDEN")
 			return
@@ -171,7 +175,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if !realms.Contains("dataverse001") {
 		hasSelfRealm := false
 		for _, realm := range realms {
-			if IsPubkeyRealm(realm) && realm == item.Pubkey {
+			if object.IsPubkeyRealm(realm) && realm == item.Pubkey {
 				hasSelfRealm = true
 				break
 			}
@@ -194,7 +198,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify signature (CPU-heavy, before acquiring any locks)
-	if err := VerifyEnvelope(body); err != nil {
+	if err := object.VerifyEnvelope(body); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
 		return
 	}
@@ -209,7 +213,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Canonicalize for storage
-	canonical, err := canonicalJSON(body)
+	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("ERROR: PUT /%s: canonical JSON: %v", ref, err)
 		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
@@ -257,12 +261,12 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
-	authPK := AuthPubkey(r)
+	authPK := auth.AuthPubkey(r)
 	metas := h.index.GetAll(pubkey, typeFilter, authPK)
-	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = h.enrichWithInboundCounts(items, refs)
+		items = enrichWithInboundCounts(h.index,items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
@@ -273,7 +277,7 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	q := r.URL.Query()
 
-	filters := InboundFilters{
+	filters := storage.InboundFilters{
 		Relation: q.Get("relation"),
 		From:     q.Get("from"),
 		Type:     q.Get("type"),
@@ -282,89 +286,17 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
 
-	authPK := AuthPubkey(r)
+	authPK := auth.AuthPubkey(r)
 	metas := h.index.GetInbound(ref, filters, authPK)
-	items, refs, nextCursor, hasMore := h.paginateAndLoad(metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = h.enrichWithInboundCounts(items, refs)
+		items = enrichWithInboundCounts(h.index,items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
 }
 
-// paginateAndLoad applies cursor/limit to sorted metas, then loads the actual objects.
-// Returns items, their refs (parallel arrays), cursor, and hasMore.
-func (h *Hub) paginateAndLoad(metas []ObjectMeta, cursor *Cursor, limit int) ([]json.RawMessage, []string, *string, bool) {
-	// Apply cursor: skip items until we pass the cursor position
-	if cursor != nil {
-		idx := 0
-		for idx < len(metas) {
-			m := metas[idx]
-			if m.UpdatedAt.Before(cursor.T) || (m.UpdatedAt.Equal(cursor.T) && m.Ref < cursor.Ref) {
-				break
-			}
-			idx++
-		}
-		metas = metas[idx:]
-	}
-
-	hasMore := len(metas) > limit
-	if hasMore {
-		metas = metas[:limit]
-	}
-
-	var items []json.RawMessage
-	var refs []string
-	for _, m := range metas {
-		data, err := h.store.Read(m.Ref)
-		if err != nil || data == nil {
-			log.Printf("WARN: paginate skip %s: read error or missing", m.Ref)
-			continue
-		}
-		item := json.RawMessage(data)
-		if m.Type == "BLOB" {
-			item = stripBlobData(item)
-		}
-		items = append(items, item)
-		refs = append(refs, m.Ref)
-	}
-
-	var nextCursor *string
-	if hasMore && len(metas) > 0 {
-		last := metas[len(metas)-1]
-		c := Cursor{T: last.UpdatedAt, Ref: last.Ref}
-		encoded, _ := json.Marshal(c)
-		s := base64.RawURLEncoding.EncodeToString(encoded)
-		nextCursor = &s
-	}
-
-	return items, refs, nextCursor, hasMore
-}
-
-// enrichWithInboundCounts adds _inbound_counts to each item in the list.
-func (h *Hub) enrichWithInboundCounts(items []json.RawMessage, refs []string) []json.RawMessage {
-	enriched := make([]json.RawMessage, len(items))
-	for i, item := range items {
-		counts := h.index.GetInboundCounts(refs[i])
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(item, &obj); err != nil {
-			log.Printf("WARN: enrich skip %s: unmarshal: %v", refs[i], err)
-			enriched[i] = item
-			continue
-		}
-		countsJSON, _ := json.Marshal(counts)
-		obj["_inbound_counts"] = countsJSON
-		result, err := json.Marshal(obj)
-		if err != nil {
-			log.Printf("WARN: enrich skip %s: marshal: %v", refs[i], err)
-			enriched[i] = item
-			continue
-		}
-		enriched[i] = result
-	}
-	return enriched
-}
 
 // acceptsHTML returns true if the request Accept header includes text/html.
 func acceptsHTML(r *http.Request) bool {
@@ -404,7 +336,7 @@ func acceptsMimeType(r *http.Request, mimeType string) bool {
 // base64-encoded) and text BLOBs (content.text, plain string). Returns true
 // if it handled the response.
 func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
-	_, item, err := ParseEnvelope(data)
+	_, item, err := object.ParseEnvelope(data)
 	if err != nil || item.Type != "BLOB" || item.Content == nil {
 		return false
 	}
@@ -483,7 +415,7 @@ func stripBlobData(data json.RawMessage) json.RawMessage {
 // resolvePageHTML extracts HTML content from a PAGE object, or follows a `page`
 // relation to find one. Returns empty string if no HTML can be resolved.
 func (h *Hub) resolvePageHTML(data []byte) string {
-	env, item, err := ParseEnvelope(data)
+	env, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		return ""
 	}
@@ -499,7 +431,7 @@ func (h *Hub) resolvePageHTML(data []byte) string {
 	if !ok || len(pageRels) == 0 {
 		return ""
 	}
-	var rel RelationRef
+	var rel object.RelationRef
 	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
 		log.Printf("WARN: resolvePageHTML: invalid page relation: %v", err)
 		return ""
@@ -509,7 +441,7 @@ func (h *Hub) resolvePageHTML(data []byte) string {
 		log.Printf("WARN: resolvePageHTML: page ref %s not found: %v", rel.Ref, err)
 		return ""
 	}
-	_, pageItem, err := ParseEnvelope(pageData)
+	_, pageItem, err := object.ParseEnvelope(pageData)
 	if err != nil {
 		log.Printf("WARN: resolvePageHTML: failed to parse page %s: %v", rel.Ref, err)
 		return ""
@@ -533,7 +465,7 @@ func (h *Hub) resolveDefaultViewerHTML() string {
 
 // pageETagSuffix returns the ETag suffix for HTML representations.
 // Includes the page/viewer revision so browser caches invalidate when the PAGE changes.
-func pageETagSuffix(index *Index, meta ObjectMeta, defaultViewerRef string) string {
+func pageETagSuffix(index *storage.Index, meta object.ObjectMeta, defaultViewerRef string) string {
 	if meta.Type == "PAGE" {
 		return "-html" // own revision tracks HTML changes
 	}
@@ -552,7 +484,7 @@ func pageETagSuffix(index *Index, meta ObjectMeta, defaultViewerRef string) stri
 }
 
 // extractHTML pulls the html string from item.content.html.
-func extractHTML(item *Item) string {
+func extractHTML(item *object.Item) string {
 	if item.Content == nil {
 		return ""
 	}
@@ -579,7 +511,7 @@ func parseLimit(s string, defaultVal, maxVal int) int {
 	return n
 }
 
-func parseCursor(s string) *Cursor {
+func parseCursor(s string) *object.Cursor {
 	if s == "" {
 		return nil
 	}
@@ -587,7 +519,7 @@ func parseCursor(s string) *Cursor {
 	if err != nil {
 		return nil
 	}
-	var c Cursor
+	var c object.Cursor
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil
 	}
@@ -596,14 +528,14 @@ func parseCursor(s string) *Cursor {
 
 func writeError(w http.ResponseWriter, status int, msg, code string) {
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(APIError{Error: msg, Code: code})
+	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
 }
 
 func writeList(w http.ResponseWriter, items []json.RawMessage, cursor *string, hasMore bool) {
 	if items == nil {
 		items = []json.RawMessage{}
 	}
-	resp := ListResponse{
+	resp := object.ListResponse{
 		Items:   items,
 		Cursor:  cursor,
 		HasMore: hasMore,

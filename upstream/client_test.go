@@ -1,20 +1,21 @@
-package main
+package upstream
 
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
-func TestUpstreamDoSuccess(t *testing.T) {
+func TestClientDoSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"ok":true}`))
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
 	resp, err := u.Do(req, nil)
 	if err != nil {
@@ -30,7 +31,7 @@ func TestUpstreamDoSuccess(t *testing.T) {
 	}
 }
 
-func TestUpstreamDoHTTPErrorNoRetry(t *testing.T) {
+func TestClientDoHTTPErrorNoRetry(t *testing.T) {
 	var callCount int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -39,7 +40,7 @@ func TestUpstreamDoHTTPErrorNoRetry(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
 	resp, err := u.Do(req, nil)
 	if err != nil {
@@ -55,13 +56,13 @@ func TestUpstreamDoHTTPErrorNoRetry(t *testing.T) {
 	}
 }
 
-func TestUpstreamDoFastFailWhenUnavailable(t *testing.T) {
+func TestClientDoFastFailWhenUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("should not reach upstream when marked unavailable")
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	u.SetAvailable(false)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
@@ -77,11 +78,11 @@ func TestUpstreamDoFastFailWhenUnavailable(t *testing.T) {
 	}
 }
 
-func TestUpstreamDoTransportErrorMarksUnavailable(t *testing.T) {
+func TestClientDoTransportErrorMarksUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
 	_, err := u.Do(req, nil)
 
@@ -93,7 +94,7 @@ func TestUpstreamDoTransportErrorMarksUnavailable(t *testing.T) {
 	}
 }
 
-func TestUpstreamDoPUTPreservesBody(t *testing.T) {
+func TestClientDoPUTPreservesBody(t *testing.T) {
 	var lastBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
@@ -103,7 +104,7 @@ func TestUpstreamDoPUTPreservesBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	bodyBytes := []byte(`{"in":"dataverse001","item":{"id":"test"}}`)
 	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/test", nil)
 	req.Header.Set("Content-Type", "application/json")
@@ -121,7 +122,7 @@ func TestUpstreamDoPUTPreservesBody(t *testing.T) {
 	}
 }
 
-func TestUpstreamHealthCheck(t *testing.T) {
+func TestClientHealthCheck(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodHead {
 			t.Errorf("health check should use HEAD, got %s", r.Method)
@@ -130,7 +131,7 @@ func TestUpstreamHealthCheck(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	u.SetAvailable(false)
 
 	err := u.HealthCheck()
@@ -142,11 +143,11 @@ func TestUpstreamHealthCheck(t *testing.T) {
 	}
 }
 
-func TestUpstreamHealthCheckFail(t *testing.T) {
+func TestClientHealthCheckFail(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	err := u.HealthCheck()
 	if err == nil {
 		t.Fatal("expected error for closed server")
@@ -156,13 +157,13 @@ func TestUpstreamHealthCheckFail(t *testing.T) {
 	}
 }
 
-func TestUpstreamHealthCheck502MarksUnavailable(t *testing.T) {
+func TestClientHealthCheck502MarksUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	err := u.HealthCheck()
 	if err == nil {
 		t.Fatal("expected error for 502 response")
@@ -172,11 +173,11 @@ func TestUpstreamHealthCheck502MarksUnavailable(t *testing.T) {
 	}
 }
 
-func TestUpstreamHealthCheckerRecovery(t *testing.T) {
+func TestClientHealthCheckerRecovery(t *testing.T) {
 	// Start with server down
-	available := false
+	var available atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !available {
+		if !available.Load() {
 			w.WriteHeader(http.StatusBadGateway)
 			return
 		}
@@ -184,7 +185,7 @@ func TestUpstreamHealthCheckerRecovery(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	u := NewUpstream(srv.URL)
+	u := NewClient(srv.URL)
 	u.SetAvailable(false)
 
 	u.StartHealthChecker(50 * time.Millisecond)
@@ -197,9 +198,27 @@ func TestUpstreamHealthCheckerRecovery(t *testing.T) {
 	}
 
 	// Bring server back
-	available = true
+	available.Store(true)
 	time.Sleep(120 * time.Millisecond)
 	if !u.Available() {
 		t.Error("should be available after server recovery")
+	}
+}
+
+func TestIsDown(t *testing.T) {
+	if !IsDown(http.StatusBadGateway) {
+		t.Error("502 should be down")
+	}
+	if !IsDown(http.StatusServiceUnavailable) {
+		t.Error("503 should be down")
+	}
+	if !IsDown(http.StatusGatewayTimeout) {
+		t.Error("504 should be down")
+	}
+	if IsDown(http.StatusOK) {
+		t.Error("200 should not be down")
+	}
+	if IsDown(http.StatusInternalServerError) {
+		t.Error("500 should not be down")
 	}
 }

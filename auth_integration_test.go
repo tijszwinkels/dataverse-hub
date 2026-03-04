@@ -15,6 +15,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/serving"
 )
 
 // signedObject creates a properly signed dataverse001 envelope for testing.
@@ -31,7 +36,7 @@ func signedObject(t *testing.T, priv *ecdsa.PrivateKey, pubkey string, id string
 		"type":       objType,
 		"content":    map[string]string{"title": "Test Object " + id},
 	}
-	itemJSON, err := canonicalJSON(mustMarshal(t, item))
+	itemJSON, err := object.CanonicalJSON(mustMarshal(t, item))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,19 +75,19 @@ func mustMarshal(t *testing.T, v any) []byte {
 }
 
 // testHubWithAuth creates a Hub with auth support for integration testing.
-func testHubWithAuth(t *testing.T) (*httptest.Server, *AuthStore, func()) {
+func testHubWithAuth(t *testing.T) (*httptest.Server, *auth.AuthStore, func()) {
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := NewStore(dir, true)
+	store, err := storage.NewStore(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	index := NewIndex()
-	limiter := NewRateLimiter(1000, 100000)
-	auth := NewAuthStore(168 * time.Hour)
-	hub := NewHub(store, index, limiter, auth, "")
+	index := storage.NewIndex()
+	limiter := auth.NewRateLimiter(1000, 100000)
+	auth := auth.NewAuthStore(168 * time.Hour)
+	hub := serving.NewHub(store, index, limiter, auth, "")
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, auth, func() {
@@ -187,7 +192,7 @@ func TestPutPrivateObjectWrongPubkey(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("PUT wrong pubkey-realm: expected 403, got %d: %s", resp.StatusCode, body)
 	}
-	var apiErr APIError
+	var apiErr object.APIError
 	json.NewDecoder(resp.Body).Decode(&apiErr)
 	resp.Body.Close()
 
@@ -349,7 +354,7 @@ func TestSearchExcludesPrivateObjects(t *testing.T) {
 
 	// Unauthenticated search — should only see public object
 	resp = doGet(t, ts, "/search")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -386,7 +391,7 @@ func TestSearchByPubkeyIncludesPrivateForOwner(t *testing.T) {
 
 	// Unauthenticated search by pubkey — should NOT see private
 	resp = doGet(t, ts, "/search?by="+pubkey)
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 	if len(list.Items) != 0 {
@@ -522,15 +527,15 @@ func TestPublicObjectWithPubkeyRealmIsVisible(t *testing.T) {
 
 func TestCORSHeadersIncludeAuthorization(t *testing.T) {
 	dir := t.TempDir()
-	store, _ := NewStore(dir, true)
-	index := NewIndex()
-	limiter := NewRateLimiter(1000, 100000)
-	auth := NewAuthStore(168 * time.Hour)
+	store, _ := storage.NewStore(dir, true)
+	index := storage.NewIndex()
+	limiter := auth.NewRateLimiter(1000, 100000)
+	authStore := auth.NewAuthStore(168 * time.Hour)
 	defer limiter.Stop()
-	defer auth.Stop()
+	defer authStore.Stop()
 
-	hub := NewHub(store, index, limiter, auth, "")
-	cfg := AuthWidgetConfig{
+	hub := serving.NewHub(store, index, limiter, authStore, "")
+	cfg := auth.WidgetConfig{
 		AuthHost:       "auth.example.com",
 		AllowedOrigins: []string{"https://example.com"},
 	}
@@ -543,7 +548,10 @@ func TestCORSHeadersIncludeAuthorization(t *testing.T) {
 	req.Header.Set("Origin", "https://example.com")
 	req.Header.Set("Access-Control-Request-Method", "GET")
 	req.Header.Set("Access-Control-Request-Headers", "Authorization")
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("OPTIONS request failed: %v", err)
+	}
 	defer resp.Body.Close()
 
 	allowHeaders := resp.Header.Get("Access-Control-Allow-Headers")

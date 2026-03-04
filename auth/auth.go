@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"context"
@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dataverse/hub/object"
 )
 
 // AuthStore manages challenges and bearer tokens in memory.
@@ -113,7 +115,7 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pubkey, err := decompressP256(pubkeyBytes)
+	pubkey, err := object.DecompressP256(pubkeyBytes)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid pubkey", "INVALID_SIGNATURE")
 		return
@@ -246,11 +248,11 @@ func AuthPubkey(r *http.Request) string {
 
 // extractBearerToken pulls the token from the Authorization header.
 func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	a := r.Header.Get("Authorization")
+	if !strings.HasPrefix(a, "Bearer ") {
 		return ""
 	}
-	return strings.TrimPrefix(auth, "Bearer ")
+	return strings.TrimPrefix(a, "Bearer ")
 }
 
 // extractCookieToken pulls the token from the dv_session cookie.
@@ -291,4 +293,10 @@ func (a *AuthStore) cleanup() {
 			delete(a.tokens, k)
 		}
 	}
+}
+
+// writeError writes a JSON error response.
+func writeError(w http.ResponseWriter, status int, msg, code string) {
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
 }

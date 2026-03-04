@@ -1,4 +1,4 @@
-package main
+package upstream
 
 import (
 	"encoding/json"
@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/storage"
 )
 
 func TestSyncPendingAddListRemove(t *testing.T) {
@@ -90,13 +92,13 @@ func TestSyncPendingDrainPushesAndRemoves(t *testing.T) {
 	defer mockUpstream.Close()
 
 	dir := t.TempDir()
-	upstream := NewUpstream(mockUpstream.URL)
+	client := NewClient(mockUpstream.URL)
 
 	storeDir := t.TempDir()
-	store, _ := NewStore(storeDir, true)
-	index := NewIndex()
+	store, _ := storage.NewStore(storeDir, true)
+	index := storage.NewIndex()
 
-	sp := NewSyncPending(dir, upstream, store, index)
+	sp := NewSyncPending(dir, client, store, index)
 
 	// Add a pending object
 	ref := "AxyU5_test.00000000-0000-0000-0000-000000000003"

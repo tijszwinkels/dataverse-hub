@@ -9,12 +9,17 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/serving"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/upstream"
 )
 
 func main() {
 	cfg := loadConfig()
 
-	store, err := NewStore(cfg.StoreDir, cfg.BackupEnabled)
+	store, err := storage.NewStore(cfg.StoreDir, cfg.BackupEnabled)
 	if err != nil {
 		log.Fatalf("Failed to initialize store: %v", err)
 	}
@@ -22,25 +27,25 @@ func main() {
 		log.Printf("Revision backups enabled (bk/ directory)")
 	}
 
-	index := NewIndex()
+	index := storage.NewIndex()
 	count, dur, err := index.Rebuild(store)
 	if err != nil {
 		log.Fatalf("Failed to rebuild index: %v", err)
 	}
 	log.Printf("Index rebuilt: %d objects in %v", count, dur)
 
-	limiter := NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
+	limiter := auth.NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
-	auth := NewAuthStore(cfg.AuthTokenExpiry)
-	defer auth.Stop()
+	authStore := auth.NewAuthStore(cfg.AuthTokenExpiry)
+	defer authStore.Stop()
 	log.Printf("Auth enabled (token expiry: %v)", cfg.AuthTokenExpiry)
 
 	var handler http.Handler
 	var proxyCleanup []func() // cleanup functions for proxy mode
 
 	// Auth widget config
-	awCfg := AuthWidgetConfig{
+	awCfg := auth.WidgetConfig{
 		AuthHost:       cfg.AuthWidgetHost,
 		AllowedOrigins: cfg.AuthWidgetAllowedOrigins,
 	}
@@ -51,29 +56,29 @@ func main() {
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
-		hub := NewHub(store, index, limiter, auth, cfg.DefaultViewerRef)
+		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef)
 		handler = hub.RouterWithAuthWidget(awCfg)
 
 	default: // "proxy" is the default
 		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
-		upstream := NewUpstream(cfg.UpstreamURL)
+		up := upstream.NewClient(cfg.UpstreamURL)
 
 		// Probe upstream before serving
-		if err := upstream.HealthCheck(); err != nil {
+		if err := up.HealthCheck(); err != nil {
 			log.Printf("WARN: upstream %s unreachable at startup: %v", cfg.UpstreamURL, err)
 		} else {
 			log.Printf("Upstream %s is reachable", cfg.UpstreamURL)
 		}
 
-		upstream.StartHealthChecker(30 * time.Second)
-		proxyCleanup = append(proxyCleanup, upstream.Stop)
+		up.StartHealthChecker(30 * time.Second)
+		proxyCleanup = append(proxyCleanup, up.Stop)
 
 		pendingDir := filepath.Join(cfg.StoreDir, "sync_pending")
-		pending := NewSyncPending(pendingDir, upstream, store, index)
+		pending := upstream.NewSyncPending(pendingDir, up, store, index)
 		pending.Start()
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
-		proxy := NewProxy(store, index, limiter, auth, cfg.DefaultViewerRef, upstream, pending)
+		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending)
 		handler = proxy.RouterWithAuthWidget(awCfg)
 	}
 

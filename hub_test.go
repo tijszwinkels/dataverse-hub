@@ -10,6 +10,11 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/serving"
 )
 
 // testHub creates a Hub with a temp store directory and returns the server + cleanup func.
@@ -17,15 +22,15 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 	t.Helper()
 
 	dir := t.TempDir()
-	store, err := NewStore(dir, true)
+	store, err := storage.NewStore(dir, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	index := NewIndex()
-	limiter := NewRateLimiter(1000, 100000) // generous limits for tests
-	auth := NewAuthStore(168 * time.Hour)
-	hub := NewHub(store, index, limiter, auth, "")
+	index := storage.NewIndex()
+	limiter := auth.NewRateLimiter(1000, 100000) // generous limits for tests
+	auth := auth.NewAuthStore(168 * time.Hour)
+	hub := serving.NewHub(store, index, limiter, auth, "")
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, func() {
@@ -40,8 +45,8 @@ func TestPutAndGetObject(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var item Item
-	var env Envelope
+	var item object.Item
+	var env object.Envelope
 	json.Unmarshal(data, &env)
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
@@ -63,11 +68,11 @@ func TestPutAndGetObject(t *testing.T) {
 	resp.Body.Close()
 
 	// Verify the returned object is valid JSON with the correct ref
-	var gotEnv Envelope
+	var gotEnv object.Envelope
 	if err := json.Unmarshal(body, &gotEnv); err != nil {
 		t.Fatalf("GET returned invalid JSON: %v", err)
 	}
-	var gotItem Item
+	var gotItem object.Item
 	json.Unmarshal(gotEnv.Item, &gotItem)
 	if gotItem.Ref() != ref {
 		t.Errorf("GET returned wrong ref: got %s, want %s", gotItem.Ref(), ref)
@@ -79,9 +84,9 @@ func TestPutRevisionConflict(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -157,9 +162,9 @@ func TestListObjects(t *testing.T) {
 	fixtures := []string{"root.json", "identity.json", "core_types.json"}
 	for _, f := range fixtures {
 		data := loadTestFixture(t, f)
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(data, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		resp := doPut(t, ts, item.Ref(), data)
 		if resp.StatusCode != http.StatusCreated {
@@ -174,7 +179,7 @@ func TestListObjects(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("list expected 200, got %d", resp.StatusCode)
 	}
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -207,9 +212,9 @@ func TestListPagination(t *testing.T) {
 	fixtures := []string{"root.json", "identity.json", "core_types.json"}
 	for _, f := range fixtures {
 		data := loadTestFixture(t, f)
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(data, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		resp := doPut(t, ts, item.Ref(), data)
 		resp.Body.Close()
@@ -217,7 +222,7 @@ func TestListPagination(t *testing.T) {
 
 	// Page with limit=2
 	resp := doGet(t, ts, "/search?limit=2")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -254,7 +259,7 @@ func TestInboundRelations(t *testing.T) {
 	// The root object is referenced by identity (via "root" relation) and core_types (via "root" relation)
 	rootRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000"
 	resp := doGet(t, ts, "/"+rootRef+"/inbound")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -269,14 +274,14 @@ func TestInboundRelations(t *testing.T) {
 	resp.Body.Close()
 
 	for _, raw := range list.Items {
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(raw, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		// Verify this item actually has a root relation pointing at rootRef
 		found := false
 		for _, rel := range item.Relations["root"] {
-			var rr RelationRef
+			var rr object.RelationRef
 			json.Unmarshal(rel, &rr)
 			if rr.Ref == rootRef {
 				found = true
@@ -300,17 +305,17 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 	}
 	for f := range fixtures {
 		data := loadTestFixture(t, f)
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(data, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		ref := item.Ref()
 		fixtures[f] = ref
 		os.WriteFile(filepath.Join(dir, ref+".json"), data, 0644)
 	}
 
-	store, _ := NewStore(dir, true)
-	index := NewIndex()
+	store, _ := storage.NewStore(dir, true)
+	index := storage.NewIndex()
 	count, _, err := index.Rebuild(store)
 	if err != nil {
 		t.Fatal(err)
@@ -321,7 +326,7 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 
 	// Check that root has inbound relations
 	rootRef := fixtures["root.json"]
-	inbound := index.GetInbound(rootRef, InboundFilters{}, "")
+	inbound := index.GetInbound(rootRef, storage.InboundFilters{}, "")
 	if len(inbound) == 0 {
 		t.Error("expected inbound relations to root after rebuild")
 	}
@@ -342,7 +347,7 @@ func TestInboundCounts(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -351,7 +356,7 @@ func TestInboundCounts(t *testing.T) {
 		var obj map[string]json.RawMessage
 		json.Unmarshal(raw, &obj)
 
-		var item Item
+		var item object.Item
 		json.Unmarshal(obj["item"], &item)
 		if item.Ref() != rootRef {
 			continue
@@ -387,7 +392,7 @@ func TestInboundCountsOnInbound(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -413,7 +418,7 @@ func TestNoInboundCountsWithoutParam(t *testing.T) {
 
 	// Without include=inbound_counts, items should NOT have the field
 	resp := doGet(t, ts, "/search")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -431,9 +436,9 @@ func TestETagAndNotModified(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -518,9 +523,9 @@ func doGetWithAccept(t *testing.T, ts *httptest.Server, path, accept string) *ht
 func putFixture(t *testing.T, ts *httptest.Server, name string) {
 	t.Helper()
 	data := loadTestFixture(t, name)
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	resp := doPut(t, ts, item.Ref(), data)
 	if resp.StatusCode != http.StatusCreated {
@@ -570,7 +575,7 @@ func TestPageServedAsJSONWithoutAcceptHTML(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	var env Envelope
+	var env object.Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		t.Fatalf("expected valid JSON envelope, got: %s", body)
 	}
@@ -618,7 +623,7 @@ func TestPageRelationJSONForAPI(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	var env Envelope
+	var env object.Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		t.Fatalf("expected valid JSON envelope, got: %s", body)
 	}
@@ -783,13 +788,13 @@ func TestBlobServedAsJSONForAPI(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	var env Envelope
+	var env object.Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		t.Fatalf("expected valid JSON envelope, got: %s", body)
 	}
 
 	// JSON should include content.data (full blob)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	var content struct {
 		Data string `json:"data"`
@@ -932,14 +937,14 @@ func TestBlobStrippedFromListResponse(t *testing.T) {
 	putFixture(t, ts, "blob.json")
 
 	resp := doGet(t, ts, "/search")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
 	for _, raw := range list.Items {
 		var obj map[string]json.RawMessage
 		json.Unmarshal(raw, &obj)
-		var item Item
+		var item object.Item
 		json.Unmarshal(obj["item"], &item)
 		if item.Type != "BLOB" {
 			continue
@@ -974,7 +979,7 @@ func TestBlobStrippedFromInboundResponse(t *testing.T) {
 
 	// Search for BLOB type specifically
 	resp := doGet(t, ts, "/search?type=BLOB")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -984,7 +989,7 @@ func TestBlobStrippedFromInboundResponse(t *testing.T) {
 
 	var obj map[string]json.RawMessage
 	json.Unmarshal(list.Items[0], &obj)
-	var item Item
+	var item object.Item
 	json.Unmarshal(obj["item"], &item)
 
 	var content map[string]json.RawMessage
@@ -1036,13 +1041,13 @@ func TestTextBlobServedAsJSONForAPI(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	var env Envelope
+	var env object.Envelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		t.Fatalf("expected valid JSON envelope, got: %s", body)
 	}
 
 	// JSON should include content.text
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	var content struct {
 		Text string `json:"text"`
@@ -1061,7 +1066,7 @@ func TestTextBlobStrippedFromListResponse(t *testing.T) {
 	putFixture(t, ts, "text_blob.json")
 
 	resp := doGet(t, ts, "/search?type=BLOB")
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -1071,7 +1076,7 @@ func TestTextBlobStrippedFromListResponse(t *testing.T) {
 
 	var obj map[string]json.RawMessage
 	json.Unmarshal(list.Items[0], &obj)
-	var item Item
+	var item object.Item
 	json.Unmarshal(obj["item"], &item)
 
 	var content map[string]json.RawMessage
@@ -1114,9 +1119,9 @@ func putAllFixtures(t *testing.T, ts *httptest.Server) {
 	fixtures := []string{"root.json", "identity.json", "core_types.json"}
 	for _, f := range fixtures {
 		data := loadTestFixture(t, f)
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(data, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		resp := doPut(t, ts, item.Ref(), data)
 		if resp.StatusCode != http.StatusCreated {

@@ -1,4 +1,4 @@
-package main
+package auth
 
 import (
 	"crypto/ecdsa"
@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/object"
 )
 
 // testKeypair generates a fresh P-256 keypair for testing.
@@ -49,7 +51,6 @@ func TestChallengeGeneration(t *testing.T) {
 
 	handler := http.HandlerFunc(auth.HandleChallenge)
 
-	// Request a challenge
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -73,7 +74,6 @@ func TestChallengeGeneration(t *testing.T) {
 		t.Error("expected non-empty expires_at")
 	}
 
-	// Verify challenge is at least 32 bytes when decoded
 	raw, err := base64.RawURLEncoding.DecodeString(resp.Challenge)
 	if err != nil {
 		t.Fatalf("challenge is not valid base64url: %v", err)
@@ -82,7 +82,6 @@ func TestChallengeGeneration(t *testing.T) {
 		t.Errorf("challenge should be at least 32 bytes, got %d", len(raw))
 	}
 
-	// Verify expiry is in the future
 	expiry, err := time.Parse(time.RFC3339, resp.ExpiresAt)
 	if err != nil {
 		t.Fatalf("invalid expires_at: %v", err)
@@ -121,7 +120,6 @@ func TestTokenExchangeValid(t *testing.T) {
 
 	priv, pubkey := testKeypair(t)
 
-	// Get challenge
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	auth.HandleChallenge(w, req)
@@ -131,7 +129,6 @@ func TestTokenExchangeValid(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &challengeResp)
 
-	// Sign and exchange
 	sig := signChallenge(t, priv, challengeResp.Challenge)
 	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"` + sig + `"}`
 	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
@@ -162,7 +159,6 @@ func TestTokenExchangeValid(t *testing.T) {
 		t.Error("expected non-empty expires_at")
 	}
 
-	// Validate the token
 	gotPubkey, ok := auth.ValidateToken(tokenResp.Token)
 	if !ok {
 		t.Fatal("token should be valid")
@@ -178,7 +174,6 @@ func TestTokenExchangeInvalidSignature(t *testing.T) {
 
 	_, pubkey := testKeypair(t)
 
-	// Get challenge
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	auth.HandleChallenge(w, req)
@@ -188,7 +183,6 @@ func TestTokenExchangeInvalidSignature(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &challengeResp)
 
-	// Send wrong signature
 	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"AAAA"}`
 	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -199,7 +193,7 @@ func TestTokenExchangeInvalidSignature(t *testing.T) {
 		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var errResp APIError
+	var errResp object.APIError
 	json.Unmarshal(w.Body.Bytes(), &errResp)
 	if errResp.Code != "INVALID_SIGNATURE" {
 		t.Errorf("expected error code INVALID_SIGNATURE, got %q", errResp.Code)
@@ -212,7 +206,6 @@ func TestTokenExchangeExpiredChallenge(t *testing.T) {
 
 	priv, pubkey := testKeypair(t)
 
-	// Manually create an expired challenge
 	challenge := "expired-challenge-test"
 	auth.mu.Lock()
 	auth.challenges[challenge] = challengeEntry{expiresAt: time.Now().Add(-1 * time.Minute)}
@@ -229,7 +222,7 @@ func TestTokenExchangeExpiredChallenge(t *testing.T) {
 		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var errResp APIError
+	var errResp object.APIError
 	json.Unmarshal(w.Body.Bytes(), &errResp)
 	if errResp.Code != "CHALLENGE_EXPIRED" {
 		t.Errorf("expected error code CHALLENGE_EXPIRED, got %q", errResp.Code)
@@ -253,7 +246,7 @@ func TestTokenExchangeUnknownChallenge(t *testing.T) {
 		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
 	}
 
-	var errResp APIError
+	var errResp object.APIError
 	json.Unmarshal(w.Body.Bytes(), &errResp)
 	if errResp.Code != "CHALLENGE_EXPIRED" {
 		t.Errorf("expected error code CHALLENGE_EXPIRED, got %q", errResp.Code)
@@ -266,7 +259,6 @@ func TestTokenExchangeReplayPrevention(t *testing.T) {
 
 	priv, pubkey := testKeypair(t)
 
-	// Get challenge
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	auth.HandleChallenge(w, req)
@@ -276,7 +268,6 @@ func TestTokenExchangeReplayPrevention(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &challengeResp)
 
-	// First exchange — should succeed
 	sig := signChallenge(t, priv, challengeResp.Challenge)
 	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"` + sig + `"}`
 	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
@@ -288,7 +279,6 @@ func TestTokenExchangeReplayPrevention(t *testing.T) {
 		t.Fatalf("first exchange: expected 200, got %d", w.Code)
 	}
 
-	// Second exchange with same challenge — should fail (single-use)
 	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
@@ -303,13 +293,11 @@ func TestTokenValidation(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
 
-	// Unknown token
 	_, ok := auth.ValidateToken("nonexistent")
 	if ok {
 		t.Error("unknown token should not be valid")
 	}
 
-	// Expired token
 	auth.mu.Lock()
 	auth.tokens["expired-token"] = tokenEntry{pubkey: "test", expiresAt: time.Now().Add(-1 * time.Minute)}
 	auth.mu.Unlock()
@@ -324,7 +312,6 @@ func TestCleanup(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
 
-	// Add expired entries
 	auth.mu.Lock()
 	auth.challenges["expired-c"] = challengeEntry{expiresAt: time.Now().Add(-1 * time.Minute)}
 	auth.challenges["valid-c"] = challengeEntry{expiresAt: time.Now().Add(5 * time.Minute)}
@@ -354,12 +341,10 @@ func TestAuthMiddleware(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
 
-	// Add a valid token
 	auth.mu.Lock()
 	auth.tokens["test-token"] = tokenEntry{pubkey: "test-pubkey", expiresAt: time.Now().Add(1 * time.Hour)}
 	auth.mu.Unlock()
 
-	// Handler that reads the auth pubkey from context
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pk := AuthPubkey(r)
 		w.Write([]byte(pk))
@@ -367,7 +352,6 @@ func TestAuthMiddleware(t *testing.T) {
 
 	handler := auth.Middleware(inner)
 
-	// Without auth header — should pass through, no pubkey
 	req := httptest.NewRequest(http.MethodGet, "/test", nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
@@ -378,7 +362,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected empty pubkey, got %q", w.Body.String())
 	}
 
-	// With valid auth header — should populate context
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
@@ -387,7 +370,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected 'test-pubkey', got %q", w.Body.String())
 	}
 
-	// With invalid auth header — should pass through, no pubkey
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer invalid-token")
 	w = httptest.NewRecorder()
@@ -396,7 +378,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected empty pubkey for invalid token, got %q", w.Body.String())
 	}
 
-	// With non-Bearer auth header — should pass through
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Basic abc123")
 	w = httptest.NewRecorder()
@@ -405,7 +386,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected empty pubkey for non-Bearer auth, got %q", w.Body.String())
 	}
 
-	// With valid cookie — should populate context
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "test-token"})
 	w = httptest.NewRecorder()
@@ -414,7 +394,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected 'test-pubkey' from cookie, got %q", w.Body.String())
 	}
 
-	// With invalid cookie — should pass through, no pubkey
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "invalid-token"})
 	w = httptest.NewRecorder()
@@ -423,7 +402,6 @@ func TestAuthMiddleware(t *testing.T) {
 		t.Errorf("expected empty pubkey for invalid cookie, got %q", w.Body.String())
 	}
 
-	// Bearer header takes precedence over cookie
 	req = httptest.NewRequest(http.MethodGet, "/test", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "invalid-token"})
@@ -440,7 +418,6 @@ func TestHandleLogout(t *testing.T) {
 
 	priv, pubkey := testKeypair(t)
 
-	// Authenticate first: challenge → token
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	auth.HandleChallenge(w, req)
@@ -466,12 +443,10 @@ func TestHandleLogout(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &tokenResp)
 
-	// Verify token is valid before logout
 	if _, ok := auth.ValidateToken(tokenResp.Token); !ok {
 		t.Fatal("token should be valid before logout")
 	}
 
-	// Logout with bearer token
 	req = httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.Header.Set("Authorization", "Bearer "+tokenResp.Token)
 	w = httptest.NewRecorder()
@@ -481,12 +456,10 @@ func TestHandleLogout(t *testing.T) {
 		t.Fatalf("logout: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify token is now invalid
 	if _, ok := auth.ValidateToken(tokenResp.Token); ok {
 		t.Error("token should be invalid after logout")
 	}
 
-	// Verify Set-Cookie clears the cookie
 	cookies := w.Result().Cookies()
 	var sessionCookie *http.Cookie
 	for _, c := range cookies {
@@ -507,12 +480,10 @@ func TestHandleLogoutWithCookie(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
 
-	// Directly insert a token
 	auth.mu.Lock()
 	auth.tokens["cookie-token"] = tokenEntry{pubkey: "test-pk", expiresAt: time.Now().Add(1 * time.Hour)}
 	auth.mu.Unlock()
 
-	// Logout with cookie instead of bearer
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "dv_session", Value: "cookie-token"})
 	w := httptest.NewRecorder()
@@ -522,7 +493,6 @@ func TestHandleLogoutWithCookie(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify token is invalidated
 	if _, ok := auth.ValidateToken("cookie-token"); ok {
 		t.Error("token should be invalid after logout via cookie")
 	}
@@ -532,7 +502,6 @@ func TestHandleLogoutUnauthenticated(t *testing.T) {
 	auth := NewAuthStore(168 * time.Hour)
 	defer auth.Stop()
 
-	// Logout without any credentials — should still return 200 (idempotent)
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	w := httptest.NewRecorder()
 	auth.HandleLogout(w, req)
@@ -541,7 +510,6 @@ func TestHandleLogoutUnauthenticated(t *testing.T) {
 		t.Fatalf("expected 200 for no-op logout, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Should still clear the cookie
 	cookies := w.Result().Cookies()
 	var sessionCookie *http.Cookie
 	for _, c := range cookies {
@@ -561,7 +529,6 @@ func TestTokenExchangeSetsCookie(t *testing.T) {
 
 	priv, pubkey := testKeypair(t)
 
-	// Get challenge
 	req := httptest.NewRequest(http.MethodGet, "/auth/challenge", nil)
 	w := httptest.NewRecorder()
 	auth.HandleChallenge(w, req)
@@ -571,7 +538,6 @@ func TestTokenExchangeSetsCookie(t *testing.T) {
 	}
 	json.Unmarshal(w.Body.Bytes(), &challengeResp)
 
-	// Exchange for token
 	sig := signChallenge(t, priv, challengeResp.Challenge)
 	body := `{"pubkey":"` + pubkey + `","challenge":"` + challengeResp.Challenge + `","signature":"` + sig + `"}`
 	req = httptest.NewRequest(http.MethodPost, "/auth/token", strings.NewReader(body))
@@ -583,7 +549,6 @@ func TestTokenExchangeSetsCookie(t *testing.T) {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// Verify Set-Cookie header
 	cookies := w.Result().Cookies()
 	var sessionCookie *http.Cookie
 	for _, c := range cookies {
@@ -608,7 +573,6 @@ func TestTokenExchangeSetsCookie(t *testing.T) {
 		t.Errorf("cookie MaxAge should be %d, got %d", int((168*time.Hour).Seconds()), sessionCookie.MaxAge)
 	}
 
-	// Verify the cookie value is a valid token
 	var tokenResp struct {
 		Token string `json:"token"`
 	}
@@ -617,7 +581,6 @@ func TestTokenExchangeSetsCookie(t *testing.T) {
 		t.Errorf("cookie value %q should match token %q", sessionCookie.Value, tokenResp.Token)
 	}
 
-	// Verify the cookie token actually works for auth
 	gotPubkey, ok := auth.ValidateToken(sessionCookie.Value)
 	if !ok {
 		t.Fatal("cookie token should be valid")

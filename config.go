@@ -12,6 +12,22 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// Config holds server configuration.
+type Config struct {
+	Mode             string // "root" or "proxy" (default: "proxy")
+	UpstreamURL      string // upstream hub URL, only used in proxy mode
+	Addr             string
+	StoreDir         string
+	RateLimitPerMin  int
+	RateLimitPerDay  int
+	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
+	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
+
+	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
+	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
+	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
+}
+
 // fileConfig mirrors Config but with pointer fields so we can distinguish
 // "not set in TOML" from "set to zero value".
 type fileConfig struct {

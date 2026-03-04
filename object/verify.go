@@ -1,4 +1,4 @@
-package main
+package object
 
 import (
 	"bytes"
@@ -61,13 +61,13 @@ func VerifyEnvelope(data []byte) error {
 		return fmt.Errorf("pubkey must be 33 bytes (compressed), got %d", len(pubkeyBytes))
 	}
 
-	pubkey, err := decompressP256(pubkeyBytes)
+	pubkey, err := DecompressP256(pubkeyBytes)
 	if err != nil {
 		return fmt.Errorf("invalid pubkey: %w", err)
 	}
 
 	// Canonical JSON of item (sorted keys, compact)
-	canonical, err := canonicalJSON(env.Item)
+	canonical, err := CanonicalJSON(env.Item)
 	if err != nil {
 		return fmt.Errorf("canonical JSON failed: %w", err)
 	}
@@ -110,9 +110,9 @@ func ParseEnvelope(data []byte) (*Envelope, *Item, error) {
 	return &env, &item, nil
 }
 
-// canonicalJSON produces compact JSON with sorted keys, matching `jq -cS`.
+// CanonicalJSON produces compact JSON with sorted keys, matching `jq -cS`.
 // Uses SetEscapeHTML(false) to avoid Go's default HTML escaping of <, >, &.
-func canonicalJSON(data []byte) ([]byte, error) {
+func CanonicalJSON(data []byte) ([]byte, error) {
 	var obj any
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, err
@@ -131,8 +131,8 @@ func canonicalJSON(data []byte) ([]byte, error) {
 	return b, nil
 }
 
-// decompressP256 takes a 33-byte compressed EC point and returns the public key.
-func decompressP256(compressed []byte) (*ecdsa.PublicKey, error) {
+// DecompressP256 takes a 33-byte compressed EC point and returns the public key.
+func DecompressP256(compressed []byte) (*ecdsa.PublicKey, error) {
 	curve := elliptic.P256()
 	x, y := elliptic.UnmarshalCompressed(curve, compressed)
 	if x == nil {

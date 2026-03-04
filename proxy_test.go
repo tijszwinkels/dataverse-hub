@@ -4,12 +4,19 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/serving"
+	"github.com/dataverse/hub/upstream"
 )
 
 // testRootAndProxy creates a root hub server and a proxy pointing at it.
@@ -19,24 +26,24 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 
 	// Root hub
 	rootDir := t.TempDir()
-	rootStore, _ := NewStore(rootDir, true)
-	rootIndex := NewIndex()
-	rootLimiter := NewRateLimiter(10000, 1000000)
-	rootAuth := NewAuthStore(168 * time.Hour)
-	rootHub := NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "")
+	rootStore, _ := storage.NewStore(rootDir, true)
+	rootIndex := storage.NewIndex()
+	rootLimiter := auth.NewRateLimiter(10000, 1000000)
+	rootAuth := auth.NewAuthStore(168 * time.Hour)
+	rootHub := serving.NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "")
 	rootSrv := httptest.NewServer(rootHub.Router())
 
 	// Proxy
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
-	proxyAuth := NewAuthStore(168 * time.Hour)
-	upstream := NewUpstream(rootSrv.URL)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	up := upstream.NewClient(rootSrv.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 
 	return proxySrv, rootSrv, func() {
@@ -54,9 +61,9 @@ func TestProxyPutAndGet(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -76,9 +83,9 @@ func TestProxyPutAndGet(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	var gotEnv Envelope
+	var gotEnv object.Envelope
 	json.Unmarshal(body, &gotEnv)
-	var gotItem Item
+	var gotItem object.Item
 	json.Unmarshal(gotEnv.Item, &gotItem)
 	if gotItem.Ref() != ref {
 		t.Errorf("expected ref %s, got %s", ref, gotItem.Ref())
@@ -90,9 +97,9 @@ func TestProxyGetCachesLocally(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -125,9 +132,9 @@ func TestProxyETagEnrichment(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -160,9 +167,9 @@ func TestProxyPutUpstreamDown(t *testing.T) {
 	rootSrv.Close()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -191,26 +198,26 @@ func TestProxyPutUpstreamDown(t *testing.T) {
 
 func TestProxyPutSyncPendingCreated(t *testing.T) {
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
 	// Point upstream at a closed server
-	upstream := NewUpstream("http://127.0.0.1:1") // will fail immediately
+	up := upstream.NewClient("http://127.0.0.1:1") // will fail immediately
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -246,9 +253,9 @@ func TestProxyRevisionConflict(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -275,9 +282,9 @@ func TestProxyForwardsSearch(t *testing.T) {
 	// PUT some fixtures through proxy
 	for _, f := range []string{"root.json", "identity.json", "core_types.json"} {
 		data := loadTestFixture(t, f)
-		var env Envelope
+		var env object.Envelope
 		json.Unmarshal(data, &env)
-		var item Item
+		var item object.Item
 		json.Unmarshal(env.Item, &item)
 		resp := doPut(t, proxySrv, item.Ref(), data)
 		resp.Body.Close()
@@ -287,7 +294,7 @@ func TestProxyForwardsSearch(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("search expected 200, got %d", resp.StatusCode)
 	}
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -301,9 +308,9 @@ func TestProxy304ToClient(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -339,9 +346,9 @@ func TestProxyClientETagNoCacheMustFetch(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 
@@ -380,26 +387,26 @@ func TestProxyGet502FallsBackToCache(t *testing.T) {
 	defer badUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
-	upstream := NewUpstream(badUpstream.URL)
+	up := upstream.NewClient(badUpstream.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
 	// Pre-populate local cache
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 	ts, _ := item.Timestamp()
@@ -424,18 +431,18 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 	defer badUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
-	upstream := NewUpstream(badUpstream.URL)
+	up := upstream.NewClient(badUpstream.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -445,7 +452,7 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected 200 from local fallback, got %d: %s", resp.StatusCode, body)
 	}
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 	resp.Body.Close()
 
@@ -472,31 +479,31 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 		}
 		// GET returns 404 — upstream doesn't have the object
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(APIError{Error: "not found", Code: "NOT_FOUND"})
+		json.NewEncoder(w).Encode(object.APIError{Error: "not found", Code: "NOT_FOUND"})
 	}))
 	defer fakeUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
-	upstream := NewUpstream(fakeUpstream.URL)
+	up := upstream.NewClient(fakeUpstream.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
 	// Pre-populate proxy's local cache
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 	ts, _ := item.Timestamp()
@@ -529,23 +536,23 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 func TestProxyGet404NotFoundBothSides(t *testing.T) {
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(APIError{Error: "not found", Code: "NOT_FOUND"})
+		json.NewEncoder(w).Encode(object.APIError{Error: "not found", Code: "NOT_FOUND"})
 	}))
 	defer fakeUpstream.Close()
 
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
-	upstream := NewUpstream(fakeUpstream.URL)
+	up := upstream.NewClient(fakeUpstream.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -560,16 +567,16 @@ func TestProxyGet404NotFoundBothSides(t *testing.T) {
 // overwrite a newer local revision with an older upstream revision.
 func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	proxyDir := t.TempDir()
-	proxyStore, _ := NewStore(proxyDir, true)
-	proxyIndex := NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyIndex := storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
 	// Use a fake upstream that tracks pushes
-	var pushReceived bool
+	var pushReceived atomic.Bool
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
-			pushReceived = true
+			pushReceived.Store(true)
 			body, _ := io.ReadAll(r.Body)
 			w.WriteHeader(http.StatusOK)
 			w.Write(body)
@@ -579,19 +586,19 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	}))
 	defer fakeUpstream.Close()
 
-	upstream := NewUpstream(fakeUpstream.URL)
+	up := upstream.NewClient(fakeUpstream.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxyAuth := NewAuthStore(168 * time.Hour)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", upstream, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 
 	// Load fixture and store as rev 28 (the fixture's actual revision)
 	data := loadTestFixture(t, "root.json")
-	var env Envelope
+	var env object.Envelope
 	json.Unmarshal(data, &env)
-	var item Item
+	var item object.Item
 	json.Unmarshal(env.Item, &item)
 	ref := item.Ref()
 	ts, _ := item.Timestamp()
@@ -608,7 +615,7 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	// We can't re-sign, but cacheLocally parses before checking signature
 	olderData := forgeRevision(t, data, localRev-1)
 
-	proxy.cacheLocally(ref, olderData)
+	proxy.CacheLocally(ref, olderData)
 
 	// Verify local still has the original revision
 	meta, found := proxyIndex.GetMeta(ref)
@@ -620,10 +627,10 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	}
 
 	// Verify it tried to push local to upstream
-	for i := 0; i < 50 && !pushReceived; i++ {
+	for i := 0; i < 50 && !pushReceived.Load(); i++ {
 		sleepMs(t, 10)
 	}
-	if !pushReceived {
+	if !pushReceived.Load() {
 		t.Error("expected proxy to push newer local version to upstream")
 	}
 }

@@ -15,28 +15,34 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dataverse/hub/auth"
+	"github.com/dataverse/hub/object"
+	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/serving"
+	"github.com/dataverse/hub/upstream"
 )
 
 // testProxyWithAuth creates a proxy hub with auth support for testing.
 // Uses a fake upstream that returns 404 for everything, forcing local-only behavior.
-func testProxyWithAuth(t *testing.T) (*httptest.Server, *AuthStore, *Store, *Index, func()) {
+func testProxyWithAuth(t *testing.T) (*httptest.Server, *auth.AuthStore, *storage.Store, *storage.Index, func()) {
 	t.Helper()
 
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(APIError{Error: "not found", Code: "NOT_FOUND"})
+		json.NewEncoder(w).Encode(object.APIError{Error: "not found", Code: "NOT_FOUND"})
 	}))
 
 	dir := t.TempDir()
-	store, _ := NewStore(dir, true)
-	index := NewIndex()
-	limiter := NewRateLimiter(10000, 1000000)
-	auth := NewAuthStore(168 * time.Hour)
-	upstream := NewUpstream(fakeUpstream.URL)
+	store, _ := storage.NewStore(dir, true)
+	index := storage.NewIndex()
+	limiter := auth.NewRateLimiter(10000, 1000000)
+	auth := auth.NewAuthStore(168 * time.Hour)
+	up := upstream.NewClient(fakeUpstream.URL)
 	pendingDir := filepath.Join(dir, "sync_pending")
-	pending := NewSyncPending(pendingDir, upstream, store, index)
+	pending := upstream.NewSyncPending(pendingDir, up, store, index)
 
-	proxy := NewProxy(store, index, limiter, auth, "", upstream, pending)
+	proxy := serving.NewProxy(store, index, limiter, auth, "", up, pending)
 	ts := httptest.NewServer(proxy.Router())
 
 	return ts, auth, store, index, func() {
@@ -49,34 +55,34 @@ func testProxyWithAuth(t *testing.T) (*httptest.Server, *AuthStore, *Store, *Ind
 
 // testProxyWithRealUpstream creates a proxy backed by a real Hub (not a 404 fake).
 // Returns the proxy server, upstream Hub server, proxy store+index, and cleanup func.
-func testProxyWithRealUpstream(t *testing.T) (proxy *httptest.Server, upstream *httptest.Server, proxyStore *Store, proxyIndex *Index, cleanup func()) {
+func testProxyWithRealUpstream(t *testing.T) (proxy *httptest.Server, upstreamSrv *httptest.Server, proxyStore *storage.Store, proxyIndex *storage.Index, cleanup func()) {
 	t.Helper()
 
 	// Create a real upstream hub
 	upstreamDir := t.TempDir()
-	upstreamStore, _ := NewStore(upstreamDir, true)
-	upstreamIndex := NewIndex()
-	upstreamLimiter := NewRateLimiter(10000, 1000000)
-	upstreamAuth := NewAuthStore(168 * time.Hour)
-	upstreamHub := NewHub(upstreamStore, upstreamIndex, upstreamLimiter, upstreamAuth, "")
-	upstream = httptest.NewServer(upstreamHub.Router())
+	upstreamStore, _ := storage.NewStore(upstreamDir, true)
+	upstreamIndex := storage.NewIndex()
+	upstreamLimiter := auth.NewRateLimiter(10000, 1000000)
+	upstreamAuth := auth.NewAuthStore(168 * time.Hour)
+	upstreamHub := serving.NewHub(upstreamStore, upstreamIndex, upstreamLimiter, upstreamAuth, "")
+	upstreamSrv = httptest.NewServer(upstreamHub.Router())
 
 	// Create proxy pointing at real upstream
 	proxyDir := t.TempDir()
-	proxyStore, _ = NewStore(proxyDir, true)
-	proxyIndex = NewIndex()
-	proxyLimiter := NewRateLimiter(10000, 1000000)
-	proxyAuth := NewAuthStore(168 * time.Hour)
-	up := NewUpstream(upstream.URL)
+	proxyStore, _ = storage.NewStore(proxyDir, true)
+	proxyIndex = storage.NewIndex()
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	up := upstream.NewClient(upstreamSrv.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
-	pending := NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	p := NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	p := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
 	proxy = httptest.NewServer(p.Router())
 
 	cleanup = func() {
 		proxy.Close()
-		upstream.Close()
+		upstreamSrv.Close()
 		upstreamLimiter.Stop()
 		upstreamAuth.Stop()
 		proxyLimiter.Stop()
@@ -102,7 +108,7 @@ func signedObjectWithRelation(t *testing.T, priv *ecdsa.PrivateKey, pubkey strin
 			relName: []map[string]string{{"ref": relTargetRef}},
 		},
 	}
-	itemJSON, err := canonicalJSON(mustMarshal(t, item))
+	itemJSON, err := object.CanonicalJSON(mustMarshal(t, item))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,10 +223,10 @@ func TestProxyGetPrivateObjectWithoutAuth(t *testing.T) {
 	os.WriteFile(tmpFile, data, 0644)
 	defer os.Remove(tmpFile)
 
-	_, item, _ := ParseEnvelope(data)
+	_, item, _ := object.ParseEnvelope(data)
 	tsTime, _ := item.Timestamp()
 	store.Write(ref, data, tsTime)
-	realms := InField([]string{pubkey})
+	realms := object.InField([]string{pubkey})
 	index.Update(ref, item, tsTime, realms)
 
 	// GET without auth should return 404
@@ -245,10 +251,10 @@ func TestProxyGetPrivateObjectWithAuth(t *testing.T) {
 	ref := pubkey + "." + id
 	data := signedObject(t, priv, pubkey, id, []string{pubkey}, "NOTE")
 
-	_, item, _ := ParseEnvelope(data)
+	_, item, _ := object.ParseEnvelope(data)
 	tsTime, _ := item.Timestamp()
 	store.Write(ref, data, tsTime)
-	realms := InField([]string{pubkey})
+	realms := object.InField([]string{pubkey})
 	index.Update(ref, item, tsTime, realms)
 
 	// Authenticate
@@ -273,20 +279,20 @@ func TestProxySearchExcludesPrivateObjects(t *testing.T) {
 	pubID := "eeee5555-5555-4555-8555-555555555555"
 	pubRef := pubkey + "." + pubID
 	pubData := signedObject(t, priv, pubkey, pubID, []string{"dataverse001"}, "NOTE")
-	_, pubItem, _ := ParseEnvelope(pubData)
+	_, pubItem, _ := object.ParseEnvelope(pubData)
 	pubTS, _ := pubItem.Timestamp()
 	store.Write(pubRef, pubData, pubTS)
-	pubRealms := InField([]string{"dataverse001"})
+	pubRealms := object.InField([]string{"dataverse001"})
 	index.Update(pubRef, pubItem, pubTS, pubRealms)
 
 	// Store a private object
 	privID := "ffff6666-6666-4666-8666-666666666666"
 	privRef := pubkey + "." + privID
 	privData := signedObject(t, priv, pubkey, privID, []string{pubkey}, "NOTE")
-	_, privItem, _ := ParseEnvelope(privData)
+	_, privItem, _ := object.ParseEnvelope(privData)
 	privTS, _ := privItem.Timestamp()
 	store.Write(privRef, privData, privTS)
-	privRealms := InField([]string{pubkey})
+	privRealms := object.InField([]string{pubkey})
 	index.Update(privRef, privItem, privTS, privRealms)
 
 	// Search without auth — should only see public
@@ -319,10 +325,10 @@ func TestProxySearchIncludesPrivateForOwner(t *testing.T) {
 	privID := "aaaa7777-7777-4777-8777-777777777777"
 	privRef := pubkey + "." + privID
 	privData := signedObject(t, priv, pubkey, privID, []string{pubkey}, "NOTE")
-	_, privItem, _ := ParseEnvelope(privData)
+	_, privItem, _ := object.ParseEnvelope(privData)
 	privTS, _ := privItem.Timestamp()
 	store.Write(privRef, privData, privTS)
-	privRealms := InField([]string{pubkey})
+	privRealms := object.InField([]string{pubkey})
 	index.Update(privRef, privItem, privTS, privRealms)
 
 	// Authenticate and search
@@ -367,10 +373,10 @@ func TestProxySearchMergesPrivateWithUpstream(t *testing.T) {
 	privID := "aaaa8888-8888-4888-8888-888888888882"
 	privRef := pubkey + "." + privID
 	privData := signedObject(t, priv, pubkey, privID, []string{pubkey}, "NOTE")
-	_, privItem, _ := ParseEnvelope(privData)
+	_, privItem, _ := object.ParseEnvelope(privData)
 	privTS, _ := privItem.Timestamp()
 	proxyStore.Write(privRef, privData, privTS)
-	proxyIndex.Update(privRef, privItem, privTS, InField([]string{pubkey}))
+	proxyIndex.Update(privRef, privItem, privTS, object.InField([]string{pubkey}))
 
 	// 3. Authenticate with the proxy
 	token := authenticateAs(t, proxy, priv, pubkey)
@@ -385,7 +391,7 @@ func TestProxySearchMergesPrivateWithUpstream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 
 	foundPub := false
@@ -431,10 +437,10 @@ func TestProxySearchMergeExcludesPrivateForUnauthenticated(t *testing.T) {
 	privID := "aaaa9999-9999-4999-8999-999999999992"
 	privRef := pubkey + "." + privID
 	privData := signedObject(t, priv, pubkey, privID, []string{pubkey}, "NOTE")
-	_, privItem, _ := ParseEnvelope(privData)
+	_, privItem, _ := object.ParseEnvelope(privData)
 	privTS, _ := privItem.Timestamp()
 	proxyStore.Write(privRef, privData, privTS)
-	proxyIndex.Update(privRef, privItem, privTS, InField([]string{pubkey}))
+	proxyIndex.Update(privRef, privItem, privTS, object.InField([]string{pubkey}))
 
 	// Search WITHOUT auth — should only see public from upstream
 	req, _ := http.NewRequest(http.MethodGet, proxy.URL+"/search?by="+pubkey+"&type=NOTE", nil)
@@ -445,7 +451,7 @@ func TestProxySearchMergeExcludesPrivateForUnauthenticated(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 
 	if len(list.Items) != 1 {
@@ -483,15 +489,15 @@ func TestProxyInboundMergesPrivateWithUpstream(t *testing.T) {
 	privID := "bbbb0000-0000-4000-8000-000000000002"
 	privRef := pubkey + "." + privID
 	privData := signedObjectWithRelation(t, priv, pubkey, privID, []string{pubkey}, "COMMENT", "comments_on", targetRef)
-	_, privItem, _ := ParseEnvelope(privData)
+	_, privItem, _ := object.ParseEnvelope(privData)
 	privTS, _ := privItem.Timestamp()
 	proxyStore.Write(privRef, privData, privTS)
-	proxyIndex.Update(privRef, privItem, privTS, InField([]string{pubkey}))
+	proxyIndex.Update(privRef, privItem, privTS, object.InField([]string{pubkey}))
 
 	// Also store the target on proxy so inbound query works locally
 	proxyStore.Write(targetRef, targetData, privTS)
-	_, targetItem, _ := ParseEnvelope(targetData)
-	proxyIndex.Update(targetRef, targetItem, privTS, InField([]string{"dataverse001"}))
+	_, targetItem, _ := object.ParseEnvelope(targetData)
+	proxyIndex.Update(targetRef, targetItem, privTS, object.InField([]string{"dataverse001"}))
 
 	// Authenticate and query inbound
 	token := authenticateAs(t, proxy, priv, pubkey)
@@ -504,7 +510,7 @@ func TestProxyInboundMergesPrivateWithUpstream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var list ListResponse
+	var list object.ListResponse
 	json.NewDecoder(resp.Body).Decode(&list)
 
 	foundPriv := false
