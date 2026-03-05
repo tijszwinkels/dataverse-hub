@@ -52,7 +52,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, html)
+		io.WriteString(w, injectBaseDomain(html, h.baseDomain()))
 	}
 }
 
@@ -181,7 +181,7 @@ func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, da
 		if html != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, html)
+			io.WriteString(w, injectBaseDomain(html, h.baseDomain()))
 			return
 		}
 	}
@@ -587,6 +587,31 @@ func parseCursor(s string) *object.Cursor {
 func writeError(w http.ResponseWriter, status int, msg, code string) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
+}
+
+// baseDomain returns the hub's base domain if vhosting is configured.
+func (h *Hub) baseDomain() string {
+	if h.Vhost != nil {
+		return h.Vhost.BaseDomain()
+	}
+	return ""
+}
+
+// injectBaseDomain inserts a <meta name="dv-base-domain"> tag into PAGE HTML.
+// If baseDomain is empty, returns html unchanged.
+func injectBaseDomain(html, baseDomain string) string {
+	if baseDomain == "" {
+		return html
+	}
+	tag := `<meta name="dv-base-domain" content="` + baseDomain + `">`
+	idx := strings.Index(strings.ToLower(html), "<head")
+	if idx >= 0 {
+		if close := strings.IndexByte(html[idx:], '>'); close >= 0 {
+			pos := idx + close + 1
+			return html[:pos] + "\n" + tag + html[pos:]
+		}
+	}
+	return tag + "\n" + html
 }
 
 func writeList(w http.ResponseWriter, items []json.RawMessage, cursor *string, hasMore bool) {

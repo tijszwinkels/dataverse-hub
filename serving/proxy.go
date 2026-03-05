@@ -47,6 +47,14 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 	}
 }
 
+// baseDomain returns the hub's base domain if vhosting is configured.
+func (p *Proxy) baseDomain() string {
+	if p.Vhost != nil {
+		return p.Vhost.BaseDomain()
+	}
+	return ""
+}
+
 // Router returns the chi router with proxy handlers and middleware.
 func (p *Proxy) Router() http.Handler {
 	return p.RouterWithAuthWidget(auth.WidgetConfig{})
@@ -114,7 +122,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, html)
+		io.WriteString(w, injectBaseDomain(html, p.baseDomain()))
 	}
 }
 
@@ -809,7 +817,7 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 		if html != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, html)
+			io.WriteString(w, injectBaseDomain(html, p.baseDomain()))
 			return
 		}
 		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
