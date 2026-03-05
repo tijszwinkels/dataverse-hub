@@ -31,6 +31,15 @@ func WidgetHandler(cfg WidgetConfig) http.HandlerFunc {
 	}
 }
 
+// ServeWidget serves the widget HTML unconditionally.
+// Used by vhost routing when the auth subdomain has already been resolved.
+func ServeWidget(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, widgetHTML)
+}
+
 // CORSMiddleware adds CORS headers for the auth widget origin.
 // The widget on auth.dataverse001.net needs to make API calls
 // (GET, PUT) back to dataverse001.net.

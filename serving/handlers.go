@@ -14,13 +14,50 @@ import (
 	"github.com/dataverse/hub/object"
 	"github.com/dataverse/hub/realm"
 	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/vhost"
 	"github.com/go-chi/chi/v5"
 )
 
 const maxBodySize = 10 << 20 // 10 MB
 
-// handleRoot serves GET / — redirects to the ROOT object.
+// handleRoot serves GET / — with vhosting, resolves Host to a PAGE or widget.
+// Without vhosting (legacy), redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if h.Vhost == nil {
+		h.handleRootLegacy(w, r)
+		return
+	}
+
+	resolved := h.Vhost.Resolve(r.Host)
+	switch {
+	case resolved == "":
+		// Bare domain or unknown host — existing behavior
+		h.handleRootLegacy(w, r)
+
+	case resolved == vhost.WidgetSentinel:
+		auth.ServeWidget(w, r)
+
+	default:
+		// Serve PAGE from resolved ref
+		data, err := h.store.Read(resolved)
+		if err != nil || data == nil {
+			log.Printf("WARN: vhost root: page %s not found", resolved)
+			writeError(w, http.StatusNotFound, "page not found", "NOT_FOUND")
+			return
+		}
+		html := h.resolvePageHTML(data)
+		if html == "" {
+			writeError(w, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, html)
+	}
+}
+
+// handleRootLegacy is the original root handler: redirect to ROOT object.
+func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 	metas := h.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
@@ -93,6 +130,21 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if match := r.Header.Get("If-None-Match"); match == etag {
 		w.WriteHeader(http.StatusNotModified)
 		return
+	}
+
+	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
+	if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
+		pageRef := ref
+		if meta.HasPageRelation && meta.PageRef != "" {
+			pageRef = meta.PageRef
+		}
+		if !h.Vhost.IsPageHost(r.Host, pageRef) {
+			hash := vhost.PageHash(pageRef)
+			scheme := requestScheme(r)
+			target := fmt.Sprintf("%s://%s.%s/%s", scheme, hash, h.Vhost.BaseDomain(), ref)
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
 	}
 
 	// Cache miss — read file for the response body
@@ -242,6 +294,12 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Update index (pass realms for visibility tracking)
 	h.index.Update(ref, item, ts, realms)
+
+	// Update vhost hash map for PAGE objects
+	if h.Vhost != nil && item.Type == "PAGE" {
+		h.Vhost.AddPage(ref)
+	}
+
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 	if isUpdate {

@@ -5,6 +5,7 @@ import (
 
 	"github.com/dataverse/hub/auth"
 	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/vhost"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -16,6 +17,7 @@ type Hub struct {
 	limiter          *auth.RateLimiter
 	auth             *auth.AuthStore
 	defaultViewerRef string
+	Vhost            *vhost.Resolver // nil = vhosting disabled
 }
 
 // NewHub creates a Hub with the given components.
@@ -38,7 +40,9 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
 	r.Use(h.auth.Middleware)
-	if cfg.AuthHost != "" {
+	// With vhosting, no CORS needed — every subdomain is same-origin.
+	// Legacy mode: add CORS if auth widget is configured.
+	if h.Vhost == nil && cfg.AuthHost != "" {
 		r.Use(auth.CORSMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
@@ -48,7 +52,9 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
 
-	if cfg.AuthHost != "" {
+	// With vhosting, widget is served by handleRoot on auth.{domain}.
+	// Legacy mode: explicit /widget route.
+	if h.Vhost == nil && cfg.AuthHost != "" {
 		r.Get("/widget", auth.WidgetHandler(cfg))
 	}
 	r.Get("/", h.handleRoot)
@@ -58,6 +64,17 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Get("/{ref}/inbound", h.handleGetInbound)
 
 	return r
+}
+
+// requestScheme returns "https" or "http" based on X-Forwarded-Proto or TLS state.
+func requestScheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 // jsonContentType sets the Content-Type header to application/json.

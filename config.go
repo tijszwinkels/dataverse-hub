@@ -26,6 +26,9 @@ type Config struct {
 	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
 	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
 	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
+
+	BaseDomain  string        // e.g. "dataverse001.net", empty = vhosting disabled
+	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
 }
 
 // fileConfig mirrors Config but with pointer fields so we can distinguish
@@ -42,6 +45,8 @@ type fileConfig struct {
 	AuthWidgetHost   *string  `toml:"auth_widget_host"`
 	AllowedOrigins   []string `toml:"auth_widget_allowed_origins"`
 	AuthTokenExpiry  *string  `toml:"auth_token_expiry"`
+	BaseDomain       *string  `toml:"base_domain"`
+	TxtCacheTTL      *string  `toml:"txt_cache_ttl"`
 }
 
 // loadConfig builds the final Config by layering: defaults < TOML file < env vars.
@@ -60,6 +65,7 @@ func loadConfig() Config {
 		DefaultViewerRef: "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b",
 		BackupEnabled:    true,
 		AuthTokenExpiry:  168 * time.Hour, // 7 days
+		TxtCacheTTL:      5 * time.Minute,
 	}
 
 	// 2. TOML file (if provided)
@@ -119,6 +125,16 @@ func applyFile(cfg *Config, path string) error {
 			log.Printf("WARN: invalid auth_token_expiry=%q, keeping %v", *fc.AuthTokenExpiry, cfg.AuthTokenExpiry)
 		}
 	}
+	if fc.BaseDomain != nil {
+		cfg.BaseDomain = *fc.BaseDomain
+	}
+	if fc.TxtCacheTTL != nil {
+		if d, err := time.ParseDuration(*fc.TxtCacheTTL); err == nil {
+			cfg.TxtCacheTTL = d
+		} else {
+			log.Printf("WARN: invalid txt_cache_ttl=%q, keeping %v", *fc.TxtCacheTTL, cfg.TxtCacheTTL)
+		}
+	}
 
 	return nil
 }
@@ -167,6 +183,16 @@ func applyEnv(cfg *Config) {
 			cfg.AuthTokenExpiry = d
 		} else {
 			log.Printf("WARN: invalid HUB_AUTH_TOKEN_EXPIRY=%q, keeping %v", v, cfg.AuthTokenExpiry)
+		}
+	}
+	if v := os.Getenv("HUB_BASE_DOMAIN"); v != "" {
+		cfg.BaseDomain = v
+	}
+	if v := os.Getenv("HUB_TXT_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.TxtCacheTTL = d
+		} else {
+			log.Printf("WARN: invalid HUB_TXT_CACHE_TTL=%q, keeping %v", v, cfg.TxtCacheTTL)
 		}
 	}
 }

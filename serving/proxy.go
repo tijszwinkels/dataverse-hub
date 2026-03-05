@@ -15,6 +15,7 @@ import (
 	"github.com/dataverse/hub/realm"
 	"github.com/dataverse/hub/storage"
 	"github.com/dataverse/hub/upstream"
+	"github.com/dataverse/hub/vhost"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -27,6 +28,7 @@ type Proxy struct {
 	limiter          *auth.RateLimiter
 	auth             *auth.AuthStore
 	defaultViewerRef string
+	Vhost            *vhost.Resolver // nil = vhosting disabled
 
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
@@ -59,7 +61,8 @@ func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(p.limiter.Middleware)
 	r.Use(p.auth.Middleware)
-	if cfg.AuthHost != "" {
+	// With vhosting, no CORS needed — every subdomain is same-origin.
+	if p.Vhost == nil && cfg.AuthHost != "" {
 		r.Use(auth.CORSMiddleware(cfg))
 	}
 	r.Use(jsonContentType)
@@ -69,7 +72,8 @@ func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Post("/auth/token", p.auth.HandleToken)
 	r.Post("/auth/logout", p.auth.HandleLogout)
 
-	if cfg.AuthHost != "" {
+	// With vhosting, widget is served by handleRoot on auth.{domain}.
+	if p.Vhost == nil && cfg.AuthHost != "" {
 		r.Get("/widget", auth.WidgetHandler(cfg))
 	}
 	r.Get("/", p.handleRoot)
@@ -81,8 +85,41 @@ func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	return r
 }
 
-// handleRoot redirects to the ROOT object from local index.
+// handleRoot serves GET / with vhost-aware routing.
 func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if p.Vhost == nil {
+		p.handleRootLegacy(w, r)
+		return
+	}
+
+	resolved := p.Vhost.Resolve(r.Host)
+	switch {
+	case resolved == "":
+		p.handleRootLegacy(w, r)
+
+	case resolved == vhost.WidgetSentinel:
+		auth.ServeWidget(w, r)
+
+	default:
+		data, err := p.store.Read(resolved)
+		if err != nil || data == nil {
+			log.Printf("[proxy] WARN: vhost root: page %s not found", resolved)
+			writeError(w, http.StatusNotFound, "page not found", "NOT_FOUND")
+			return
+		}
+		html := p.resolvePageHTML(resolved, data)
+		if html == "" {
+			writeError(w, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, html)
+	}
+}
+
+// handleRootLegacy redirects to the ROOT object from local index.
+func (p *Proxy) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 	metas := p.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
@@ -257,6 +294,10 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
 		p.index.Update(ref, item, ts, realms)
+		// Update vhost hash map for PAGE objects
+		if p.Vhost != nil && item.Type == "PAGE" {
+			p.Vhost.AddPage(ref)
+		}
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 		w.WriteHeader(resp.StatusCode)
@@ -569,6 +610,10 @@ func (p *Proxy) CacheLocally(ref string, data []byte) {
 		return
 	}
 	p.index.Update(ref, item, ts)
+	// Update vhost hash map for PAGE objects
+	if p.Vhost != nil && item.Type == "PAGE" {
+		p.Vhost.AddPage(ref)
+	}
 	log.Printf("[proxy] cached %s rev %d (%s)", ref, item.Revision, item.Type)
 }
 
@@ -710,6 +755,21 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		return
 	}
 
+	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
+	if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
+		pageRef := ref
+		if meta.HasPageRelation && meta.PageRef != "" {
+			pageRef = meta.PageRef
+		}
+		if !p.Vhost.IsPageHost(r.Host, pageRef) {
+			hash := vhost.PageHash(pageRef)
+			scheme := requestScheme(r)
+			target := fmt.Sprintf("%s://%s.%s/%s", scheme, hash, p.Vhost.BaseDomain(), ref)
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+	}
+
 	data, err := p.store.Read(ref)
 	if err != nil || data == nil {
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
@@ -832,6 +892,10 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 		return
 	}
 	p.index.Update(ref, item, ts, realms)
+	// Update vhost hash map for PAGE objects
+	if p.Vhost != nil && item.Type == "PAGE" {
+		p.Vhost.AddPage(ref)
+	}
 	log.Printf("stored %s rev %d (%s) [private, local-only]", ref, item.Revision, item.Type)
 
 	w.WriteHeader(http.StatusCreated)
@@ -876,6 +940,10 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 		return
 	}
 	p.index.Update(ref, item, ts, realms)
+	// Update vhost hash map for PAGE objects
+	if p.Vhost != nil && item.Type == "PAGE" {
+		p.Vhost.AddPage(ref)
+	}
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending
