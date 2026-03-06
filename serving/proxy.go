@@ -57,11 +57,6 @@ func (p *Proxy) baseDomain() string {
 
 // Router returns the chi router with proxy handlers and middleware.
 func (p *Proxy) Router() http.Handler {
-	return p.RouterWithAuthWidget(auth.WidgetConfig{})
-}
-
-// RouterWithAuthWidget returns the chi router with auth widget support.
-func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
@@ -69,10 +64,6 @@ func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(p.limiter.Middleware)
 	r.Use(p.auth.Middleware)
-	// With vhosting, no CORS needed — every subdomain is same-origin.
-	if p.Vhost == nil && cfg.AuthHost != "" {
-		r.Use(auth.CORSMiddleware(cfg))
-	}
 	r.Use(jsonContentType)
 
 	// Auth routes
@@ -80,10 +71,6 @@ func (p *Proxy) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Post("/auth/token", p.auth.HandleToken)
 	r.Post("/auth/logout", p.auth.HandleLogout)
 
-	// With vhosting, widget is served by handleRoot on auth.{domain}.
-	if p.Vhost == nil && cfg.AuthHost != "" {
-		r.Get("/widget", auth.WidgetHandler(cfg))
-	}
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
 	r.Get("/{ref}", p.handleGetObject)
@@ -104,9 +91,6 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case resolved == "":
 		p.handleRootLegacy(w, r)
-
-	case resolved == vhost.WidgetSentinel:
-		auth.ServeWidget(w, r)
 
 	default:
 		data, err := p.store.Read(resolved)

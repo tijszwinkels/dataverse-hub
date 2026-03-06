@@ -27,12 +27,6 @@ func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimite
 
 // Router returns the chi router with all routes and middleware.
 func (h *Hub) Router() http.Handler {
-	return h.RouterWithAuthWidget(auth.WidgetConfig{})
-}
-
-// RouterWithAuthWidget returns the chi router with auth widget support.
-// If cfg.AuthHost is empty, the widget route and CORS middleware are skipped.
-func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
@@ -40,11 +34,6 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
 	r.Use(h.auth.Middleware)
-	// With vhosting, no CORS needed — every subdomain is same-origin.
-	// Legacy mode: add CORS if auth widget is configured.
-	if h.Vhost == nil && cfg.AuthHost != "" {
-		r.Use(auth.CORSMiddleware(cfg))
-	}
 	r.Use(jsonContentType)
 
 	// Auth routes
@@ -52,11 +41,6 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
 
-	// With vhosting, widget is served by handleRoot on auth.{domain}.
-	// Legacy mode: explicit /widget route.
-	if h.Vhost == nil && cfg.AuthHost != "" {
-		r.Get("/widget", auth.WidgetHandler(cfg))
-	}
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
 	r.Get("/{ref}", h.handleGetObject)

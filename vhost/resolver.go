@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-// WidgetSentinel is returned by Resolve when the host is the auth widget subdomain.
-const WidgetSentinel = "WIDGET"
-
 // DNSLookup is a function that looks up TXT records for a host.
 // Injected for testability (defaults to net.LookupTXT).
 type DNSLookup func(host string) ([]string, error)
@@ -51,7 +48,7 @@ func (r *Resolver) BaseDomain() string {
 }
 
 // Resolve returns the PAGE ref for a Host header value, or "".
-// Resolution order: bare domain → custom domain TXT → subdomain TXT → auth → hash lookup.
+// Resolution order: bare domain → custom domain TXT → subdomain TXT → hash lookup.
 func (r *Resolver) Resolve(host string) string {
 	host = stripPort(host)
 
@@ -68,11 +65,6 @@ func (r *Resolver) Resolve(host string) string {
 	// TXT lookup (cached)
 	if ref := r.lookupCachedTXT(host); ref != "" {
 		return ref
-	}
-
-	// Auth widget special case
-	if sub == "auth" {
-		return WidgetSentinel
 	}
 
 	// Hash map lookup

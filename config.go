@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -23,9 +22,7 @@ type Config struct {
 	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
 	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
 
-	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
-	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
-	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
+	AuthTokenExpiry time.Duration // bearer token lifetime (default: 168h = 7 days)
 
 	BaseDomain  string        // e.g. "dataverse001.net", empty = vhosting disabled
 	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
@@ -42,9 +39,7 @@ type fileConfig struct {
 	RateLimitPerDay  *int     `toml:"rate_limit_per_day"`
 	DefaultViewerRef *string  `toml:"default_viewer_ref"`
 	BackupEnabled    *bool    `toml:"backup_enabled"`
-	AuthWidgetHost   *string  `toml:"auth_widget_host"`
-	AllowedOrigins   []string `toml:"auth_widget_allowed_origins"`
-	AuthTokenExpiry  *string  `toml:"auth_token_expiry"`
+	AuthTokenExpiry *string `toml:"auth_token_expiry"`
 	BaseDomain       *string  `toml:"base_domain"`
 	TxtCacheTTL      *string  `toml:"txt_cache_ttl"`
 }
@@ -112,12 +107,6 @@ func applyFile(cfg *Config, path string) error {
 	if fc.BackupEnabled != nil {
 		cfg.BackupEnabled = *fc.BackupEnabled
 	}
-	if fc.AuthWidgetHost != nil {
-		cfg.AuthWidgetHost = *fc.AuthWidgetHost
-	}
-	if fc.AllowedOrigins != nil {
-		cfg.AuthWidgetAllowedOrigins = fc.AllowedOrigins
-	}
 	if fc.AuthTokenExpiry != nil {
 		if d, err := time.ParseDuration(*fc.AuthTokenExpiry); err == nil {
 			cfg.AuthTokenExpiry = d
@@ -172,12 +161,6 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_BACKUP_ENABLED"); v != "" {
 		cfg.BackupEnabled = v == "true"
 	}
-	if v := os.Getenv("HUB_AUTH_WIDGET_HOST"); v != "" {
-		cfg.AuthWidgetHost = v
-	}
-	if v := os.Getenv("HUB_AUTH_WIDGET_ALLOWED_ORIGINS"); v != "" {
-		cfg.AuthWidgetAllowedOrigins = splitTrim(v, ",")
-	}
 	if v := os.Getenv("HUB_AUTH_TOKEN_EXPIRY"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.AuthTokenExpiry = d
@@ -197,14 +180,3 @@ func applyEnv(cfg *Config) {
 	}
 }
 
-func splitTrim(s, sep string) []string {
-	parts := strings.Split(s, sep)
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}

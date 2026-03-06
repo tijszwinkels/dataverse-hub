@@ -60,29 +60,12 @@ func main() {
 	var handler http.Handler
 	var proxyCleanup []func() // cleanup functions for proxy mode
 
-	// Legacy auth widget config (used when BaseDomain is empty)
-	awCfg := auth.WidgetConfig{
-		AuthHost:       cfg.AuthWidgetHost,
-		AllowedOrigins: cfg.AuthWidgetAllowedOrigins,
-	}
-
-	// Deprecation warnings
-	if resolver != nil && awCfg.AuthHost != "" {
-		log.Printf("WARN: auth_widget_host is deprecated (vhosting handles this). Remove from config.")
-	}
-	if resolver != nil && len(cfg.AuthWidgetAllowedOrigins) > 0 {
-		log.Printf("WARN: auth_widget_allowed_origins is deprecated (no CORS needed with vhosting). Remove from config.")
-	}
-	if resolver == nil && awCfg.AuthHost != "" {
-		log.Printf("Auth widget enabled on %s (legacy mode)", awCfg.AuthHost)
-	}
-
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
 		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef)
 		hub.Vhost = resolver
-		handler = hub.RouterWithAuthWidget(awCfg)
+		handler = hub.Router()
 
 	default: // "proxy" is the default
 		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
@@ -105,7 +88,7 @@ func main() {
 
 		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending)
 		proxy.Vhost = resolver
-		handler = proxy.RouterWithAuthWidget(awCfg)
+		handler = proxy.Router()
 	}
 
 	srv := &http.Server{

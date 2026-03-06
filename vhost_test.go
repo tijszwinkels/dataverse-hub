@@ -145,17 +145,14 @@ func TestVhost_TXTSubdomain_ServesPage(t *testing.T) {
 	}
 }
 
-func TestVhost_AuthSubdomain_ServesWidget(t *testing.T) {
+func TestVhost_AuthSubdomain_NoSpecialCase(t *testing.T) {
+	// "auth" is no longer a special-cased subdomain — treated like any unknown subdomain
 	ts, _, cleanup := testHubWithVhost(t, "example.com", nil)
 	defer cleanup()
 
 	resp := doGetWithHost(t, ts, "/", "auth.example.com", "text/html")
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("auth subdomain /: expected 200, got %d", resp.StatusCode)
-	}
-	ct := resp.Header.Get("Content-Type")
-	if ct != "text/html; charset=utf-8" {
-		t.Errorf("expected text/html, got %q", ct)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("auth subdomain /: expected 404 (no longer special), got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 }

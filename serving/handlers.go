@@ -20,7 +20,7 @@ import (
 
 const maxBodySize = 10 << 20 // 10 MB
 
-// handleRoot serves GET / — with vhosting, resolves Host to a PAGE or widget.
+// handleRoot serves GET / — with vhosting, resolves Host to a PAGE.
 // Without vhosting (legacy), redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 	if h.Vhost == nil {
@@ -33,9 +33,6 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 	case resolved == "":
 		// Bare domain or unknown host — existing behavior
 		h.handleRootLegacy(w, r)
-
-	case resolved == vhost.WidgetSentinel:
-		auth.ServeWidget(w, r)
 
 	default:
 		// Serve PAGE from resolved ref

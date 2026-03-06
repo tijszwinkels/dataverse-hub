@@ -73,17 +73,17 @@ func TestResolve_BareDomain(t *testing.T) {
 	}
 }
 
-func TestResolve_AuthSubdomain(t *testing.T) {
+func TestResolve_AuthSubdomain_NoSpecialCase(t *testing.T) {
+	// "auth" is no longer a special-cased subdomain — treated like any other
 	r := NewResolver("example.com", 5*time.Minute, mockDNS(nil))
 
 	got := r.Resolve("auth.example.com")
-	if got != WidgetSentinel {
-		t.Errorf("Resolve(auth) = %q, want %q", got, WidgetSentinel)
+	if got != "" {
+		t.Errorf("Resolve(auth) = %q, want empty (no TXT, no hash)", got)
 	}
 }
 
-func TestResolve_AuthTXTOverride(t *testing.T) {
-	// If _dv.auth.example.com has a TXT record, TXT wins over the auth sentinel
+func TestResolve_AuthSubdomainWithTXT(t *testing.T) {
 	r := NewResolver("example.com", 5*time.Minute, mockDNS(map[string][]string{
 		"_dv.auth.example.com": {"dv1-page=pk.uuid-custom-auth"},
 	}))
