@@ -90,15 +90,15 @@ func (r *Resolver) Subdomain(host string) string {
 }
 
 // IsPageHost checks if the host matches a given PAGE ref
-// (either via TXT record or hash subdomain).
+// (either via hash subdomain or TXT record).
 func (r *Resolver) IsPageHost(host, pageRef string) bool {
-	resolved := r.Resolve(host)
-	if resolved == pageRef {
+	// Fast path: hash subdomain check (no DNS)
+	sub := r.Subdomain(host)
+	if sub == PageHash(pageRef) {
 		return true
 	}
-	// Also check hash match directly (avoids TXT lookup for redirects)
-	sub := r.Subdomain(host)
-	return sub == PageHash(pageRef)
+	// Slow path: full resolution (TXT lookup, cached)
+	return r.Resolve(host) == pageRef
 }
 
 // UpdateHashMap replaces the hash→ref map. Called on startup and when PAGEs change.
@@ -113,13 +113,6 @@ func (r *Resolver) AddPage(ref string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hashMap[PageHash(ref)] = ref
-}
-
-// RemovePage removes a PAGE from the hash map.
-func (r *Resolver) RemovePage(ref string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.hashMap, PageHash(ref))
 }
 
 // lookupCachedTXT returns the PAGE ref from DNS TXT records, using a cache.
@@ -142,8 +135,8 @@ func (r *Resolver) lookupCachedTXT(host string) string {
 				ref = strings.TrimPrefix(txt, "dv1-page=")
 				break
 			}
-			// Also accept bare ref (no prefix)
-			if strings.Contains(txt, ".") && !strings.Contains(txt, "=") {
+			// Also accept bare ref: {base64url-pubkey}.{uuid}
+			if looksLikeRef(txt) {
 				ref = txt
 				break
 			}
@@ -156,6 +149,15 @@ func (r *Resolver) lookupCachedTXT(host string) string {
 	r.mu.Unlock()
 
 	return ref
+}
+
+// looksLikeRef checks if a string looks like a dataverse composite ref:
+// {base64url-pubkey-44-chars}.{uuid-36-chars} = 81 chars with a dot at position 44.
+func looksLikeRef(s string) bool {
+	if len(s) != 81 {
+		return false
+	}
+	return s[44] == '.'
 }
 
 // stripPort removes the port from a host:port string.

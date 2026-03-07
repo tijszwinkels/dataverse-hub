@@ -35,6 +35,17 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		h.handleRootLegacy(w, r)
 
 	default:
+		// ETag/304 check via index (no disk I/O)
+		if meta, found := h.index.GetMeta(resolved); found {
+			etag := `"` + strconv.Itoa(meta.Revision) + `-html"`
+			w.Header().Set("Vary", "Accept")
+			w.Header().Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
 		// Serve PAGE from resolved ref
 		data, err := h.store.Read(resolved)
 		if err != nil || data == nil {
@@ -120,15 +131,6 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		etag = etag[:len(etag)-1] + `-blob"`
 	}
 
-	w.Header().Set("Vary", "Accept")
-	w.Header().Set("ETag", etag)
-
-	// 304 Not Modified — zero disk I/O
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
 	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
 	if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
 		pageRef := ref
@@ -142,6 +144,15 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
+	}
+
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("ETag", etag)
+
+	// 304 Not Modified — zero disk I/O
+	if match := r.Header.Get("If-None-Match"); match == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
 
 	// Cache miss — read file for the response body

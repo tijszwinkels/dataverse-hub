@@ -53,14 +53,27 @@ func TestResolve_TXTRecord(t *testing.T) {
 }
 
 func TestResolve_TXTBareRef(t *testing.T) {
-	// Accept bare ref (no dv1-page= prefix)
+	// Accept bare ref (no dv1-page= prefix) — must be a valid 81-char composite ref
+	bareRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.ea96b9f6-1234-5678-9abc-def012345678"
 	r := NewResolver("example.com", 5*time.Minute, mockDNS(map[string][]string{
-		"_dv.social.example.com": {"pk.uuid-social"},
+		"_dv.social.example.com": {bareRef},
 	}))
 
 	got := r.Resolve("social.example.com")
-	if got != "pk.uuid-social" {
-		t.Errorf("Resolve(bare ref) = %q, want %q", got, "pk.uuid-social")
+	if got != bareRef {
+		t.Errorf("Resolve(bare ref) = %q, want %q", got, bareRef)
+	}
+}
+
+func TestResolve_TXTBareRef_RejectsNonRef(t *testing.T) {
+	// Non-ref TXT records should not be accepted as bare refs
+	r := NewResolver("example.com", 5*time.Minute, mockDNS(map[string][]string{
+		"_dv.social.example.com": {"v=spf1 include:example.com ~all"},
+	}))
+
+	got := r.Resolve("social.example.com")
+	if got != "" {
+		t.Errorf("Resolve(non-ref TXT) = %q, want empty", got)
 	}
 }
 
@@ -118,13 +131,14 @@ func TestResolve_UnknownHost(t *testing.T) {
 
 func TestResolve_CustomDomain(t *testing.T) {
 	// Custom domain not a subdomain of base — TXT lookup at _dv.{domain}
+	customRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.ea96b9f6-1234-5678-9abc-def012345678"
 	r := NewResolver("example.com", 5*time.Minute, mockDNS(map[string][]string{
-		"_dv.dataverse.social": {"pk.uuid-social-page"},
+		"_dv.dataverse.social": {"dv1-page=" + customRef},
 	}))
 
 	got := r.Resolve("dataverse.social")
-	if got != "pk.uuid-social-page" {
-		t.Errorf("Resolve(custom domain) = %q, want %q", got, "pk.uuid-social-page")
+	if got != customRef {
+		t.Errorf("Resolve(custom domain) = %q, want %q", got, customRef)
 	}
 }
 
@@ -249,20 +263,6 @@ func TestAddPage(t *testing.T) {
 	got := r.Resolve(hash + ".example.com")
 	if got != ref {
 		t.Errorf("after AddPage, Resolve = %q, want %q", got, ref)
-	}
-}
-
-func TestRemovePage(t *testing.T) {
-	r := NewResolver("example.com", 5*time.Minute, mockDNS(nil))
-
-	ref := "pk.uuid-page"
-	r.AddPage(ref)
-	r.RemovePage(ref)
-
-	hash := PageHash(ref)
-	got := r.Resolve(hash + ".example.com")
-	if got != "" {
-		t.Errorf("after RemovePage, Resolve = %q, want empty", got)
 	}
 }
 

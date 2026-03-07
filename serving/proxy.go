@@ -94,6 +94,17 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 		p.handleRootLegacy(w, r)
 
 	default:
+		// ETag/304 check via index (no disk I/O)
+		if meta, found := p.index.GetMeta(resolved); found {
+			etag := `"` + strconv.Itoa(meta.Revision) + `-html"`
+			w.Header().Set("Vary", "Accept")
+			w.Header().Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
 		data, err := p.store.Read(resolved)
 		if err != nil || data == nil {
 			log.Printf("[proxy] WARN: vhost root: page %s not found", resolved)
@@ -740,14 +751,6 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		etag = etag[:len(etag)-1] + `-blob"`
 	}
 
-	w.Header().Set("Vary", "Accept")
-	w.Header().Set("ETag", etag)
-
-	if clientETag == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
 	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
 	if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
 		pageRef := ref
@@ -761,6 +764,14 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
+	}
+
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("ETag", etag)
+
+	if clientETag == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
 
 	data, err := p.store.Read(ref)
