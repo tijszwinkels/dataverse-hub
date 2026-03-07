@@ -71,6 +71,7 @@ func (p *Proxy) Router() http.Handler {
 	r.Post("/auth/token", p.auth.HandleToken)
 	r.Post("/auth/logout", p.auth.HandleLogout)
 
+	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
 	r.Get("/{ref}", p.handleGetObject)

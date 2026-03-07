@@ -41,6 +41,7 @@ func (h *Hub) Router() http.Handler {
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
 
+	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
 	r.Get("/{ref}", h.handleGetObject)

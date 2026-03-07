@@ -611,6 +611,31 @@ func injectBaseDomain(html, baseDomain string) string {
 	return tag + "\n" + html
 }
 
+// TLSAskHandler returns an http.HandlerFunc for Caddy's on-demand TLS "ask"
+// endpoint. It validates the requested domain against the vhost resolver:
+// known PAGE hash subdomains and custom domains with _dv. TXT records are
+// approved (200), everything else is rejected (403).
+func TLSAskHandler(resolver *vhost.Resolver) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := r.URL.Query().Get("domain")
+		if domain == "" {
+			http.Error(w, "missing domain param", http.StatusBadRequest)
+			return
+		}
+		if resolver == nil {
+			log.Printf("TLS ask: rejected %q (vhosting disabled)", domain)
+			http.Error(w, "vhosting disabled", http.StatusForbidden)
+			return
+		}
+		if resolver.Resolve(domain) != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		log.Printf("TLS ask: rejected %q", domain)
+		http.Error(w, "unknown domain", http.StatusForbidden)
+	}
+}
+
 func writeList(w http.ResponseWriter, items []json.RawMessage, cursor *string, hasMore bool) {
 	if items == nil {
 		items = []json.RawMessage{}
