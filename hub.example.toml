@@ -24,6 +24,11 @@
 # Keep old revisions in bk/ on update
 # backup_enabled = true
 
-# Auth widget (cross-origin identity widget)
-# auth_widget_host = "auth.dataverse001.net"
-# auth_widget_allowed_origins = ["https://dataverse001.net"]
+# Auth token / session cookie lifetime (Go duration string)
+# auth_token_expiry = "168h"
+
+# Base domain for virtual hosting (enables wildcard subdomains + custom domains)
+# base_domain = "dataverse001.net"
+
+# DNS TXT record cache TTL for custom domain resolution
+# txt_cache_ttl = "5m"
