@@ -64,7 +64,7 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 | `default_viewer_ref` | *(built-in)* | PAGE ref used as default HTML viewer |
 | `backup_enabled` | `true` | Keep old revisions in `bk/` |
 | `auth_token_expiry` | `"168h"` | Bearer token / session cookie lifetime |
-| `base_domain` | *(empty)* | Base domain for virtual hosting (e.g. `"dataverse001.net"`) |
+| `base_domain` | `"localhost"` | Base domain for virtual hosting (set to `""` to disable) |
 | `txt_cache_ttl` | `"5m"` | DNS TXT record cache TTL for custom domain resolution |
 
 ### Environment variables
@@ -162,7 +162,9 @@ Approves certificates for hash subdomains (`{hash}.{base_domain}`) and custom do
 
 ## Virtual hosting
 
-When `base_domain` is set, the hub resolves PAGE objects from the `Host` header for origin isolation:
+Virtual hosting is enabled by default (`base_domain = "localhost"`). For production, set it to your domain. To disable, set `base_domain = ""`.
+
+The hub resolves PAGE objects from the `Host` header for origin isolation:
 
 - **Hash subdomains** — `{sha256prefix}.{base_domain}` maps to a PAGE ref deterministically
 - **Named subdomains** — `social.{base_domain}` resolved via `_dv.social.{base_domain}` TXT record
@@ -187,7 +189,7 @@ Virtual hosting gives each PAGE its own origin (subdomain or custom domain). The
 - **Hash subdomains** (`{hash}.dataverse001.net`) — every PAGE gets a unique, deterministic subdomain automatically.
 - **Custom domains** — PAGE authors can point their own domain at the hub for friendlier URLs, with the same isolation.
 
-**Without virtual hosting** (single-origin deployment), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages. Enable `base_domain` in production if you serve user-submitted PAGEs.
+**Without virtual hosting** (`base_domain = ""`), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages.
 
 ### Identity per site
 

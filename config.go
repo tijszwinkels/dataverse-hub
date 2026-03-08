@@ -60,6 +60,7 @@ func loadConfig() Config {
 		DefaultViewerRef: "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b",
 		BackupEnabled:    true,
 		AuthTokenExpiry:  168 * time.Hour, // 7 days
+		BaseDomain:       "localhost",
 		TxtCacheTTL:      5 * time.Minute,
 	}
 

@@ -27,7 +27,8 @@
 # Auth token / session cookie lifetime (Go duration string)
 # auth_token_expiry = "168h"
 
-# Base domain for virtual hosting (enables wildcard subdomains + custom domains)
+# Base domain for virtual hosting (default: "localhost")
+# Set to your domain in production. Set to "" to disable.
 # base_domain = "dataverse001.net"
 
 # DNS TXT record cache TTL for custom domain resolution
