@@ -1,29 +1,31 @@
 # Dataverse Hub
 
-HTTP server for [dataverse001](https://dataverse001.net) — a decentralized, self-describing graph data format.
+HTTP server for [dataverse001](https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) — a decentralized, self-describing graph data format.
 
-The hub stores, indexes, and serves signed [instructionGraph001](https://dataverse001.net) objects. It verifies ECDSA-P256 signatures on ingest, maintains an in-memory index for fast lookups, and serves objects as JSON (API) or HTML (browsers).
+## What is dataverse001?
 
-## Features
+dataverse001 is a signed, self-describing graph. Every object is a JSON fragment carrying its own schema, cryptographic signature, and typed relations to other objects. Objects can live anywhere — files, APIs, QR codes, embedded in images — and any agent that encounters one can verify and understand it without external documentation.
 
-- **Signature verification** — every ingested object is cryptographically verified (ECDSA-P256)
-- **Content negotiation** — JSON for APIs, rendered HTML for browsers, raw content for BLOBs
-- **Authentication** — ECDSA challenge-response auth with bearer tokens and session cookies
-- **Private objects** — pubkey-realm access control (owner's pubkey as realm name)
-- **Virtual hosting** — per-PAGE origin isolation via wildcard subdomains and custom domains
-- **Proxy mode** — cache-and-forward to an upstream hub with offline resilience
-- **Rate limiting** — per-IP request throttling (configurable per-minute and per-day limits)
-- **On-demand TLS** — smart `/ask` endpoint for Caddy's on-demand TLS with abuse prevention
-- **Minimal dependencies** — only two: [chi](https://github.com/go-chi/chi) (router) and [toml](https://github.com/BurntSushi/toml) (config)
+The hub is one way to store and serve these objects. It's not the only way — the format is transport-agnostic — but it's the easiest way to get started.
 
-## Quick start
+See the [dataverse001 root node](https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) for the full data format specification.
+
+## Run locally
+
+The quickest way to explore the dataverse is to run a local hub in proxy mode. It caches objects from the public hub and lets you browse them at `http://localhost:5678`.
+
+**Prerequisites:** Go 1.22+
 
 ```bash
+git clone https://github.com/tijszwinkels/dataverse-hub.git
+cd dataverse-hub
 go build -o hub .
 ./hub
 ```
 
-Defaults to proxy mode on `:5678`, upstream `https://dataverse001.net`, store in `./dataverse001/`.
+That's it. The hub starts on `http://localhost:5678`, proxying to `https://dataverse001.net`. Try opening [the root node](http://localhost:5678/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) in your browser.
+
+Objects you access are cached locally in `./dataverse001/`. If the upstream goes down, your local hub keeps serving everything it has seen.
 
 ### Docker
 
@@ -34,7 +36,7 @@ docker run -p 5678:5678 -v ./dataverse001:/dataverse001 hub
 
 ## Modes
 
-**Root mode** — authoritative hub, serves directly from local store.
+**Root mode** — authoritative hub, serves directly from local store. Use this when running your own independent hub.
 
 **Proxy mode** (default) — caches locally, forwards to an upstream hub. Falls back to local cache when upstream is unreachable. Pending writes are queued and synced when connectivity returns.
 
@@ -173,6 +175,27 @@ Use `cmd/pagehash` to compute the hash subdomain for a PAGE:
 ```bash
 go run ./cmd/pagehash AxyU5_...ea96b9f6-...
 ```
+
+## Security model
+
+The hub can serve user-submitted HTML (PAGE objects) that runs user-submitted JavaScript. This is powerful — anyone can publish a webapp to the dataverse — but it requires careful isolation.
+
+### Origin isolation via virtual hosting
+
+Virtual hosting gives each PAGE its own origin (subdomain or custom domain). The browser's same-origin policy then prevents pages from accessing each other's cookies, localStorage, or making authenticated requests on each other's behalf.
+
+- **Hash subdomains** (`{hash}.dataverse001.net`) — every PAGE gets a unique, deterministic subdomain automatically.
+- **Custom domains** — PAGE authors can point their own domain at the hub for friendlier URLs, with the same isolation.
+
+**Without virtual hosting** (single-origin deployment), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages. Enable `base_domain` in production if you serve user-submitted PAGEs.
+
+### Identity per site
+
+Each PAGE origin has its own isolated authentication session. When you create an account (keypair) on a PAGE, that identity only exists on that origin — other pages cannot access it.
+
+**For untrusted pages, create a separate identity.** A malicious page has full control over the JavaScript running in its origin, which means it can act as you within that origin. By using a throwaway identity on untrusted pages, you limit the blast radius: the worst a malicious page can do is act as a throwaway account that owns nothing of value.
+
+Use your main identity only on pages you trust.
 
 ## Tests
 
