@@ -1,3 +1,5 @@
 hub
+hub.toml
 dataverse001/
 store/
+*.log
