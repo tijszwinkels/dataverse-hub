@@ -1,6 +1,6 @@
 # Dataverse Hub
 
-HTTP server for [dataverse001](https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) — a decentralized, self-describing graph data format.
+HTTP server for [dataverse001](https://dataverse001.net) — a decentralized, self-describing graph data format.
 
 ## What is dataverse001?
 
@@ -8,7 +8,7 @@ dataverse001 is a signed, self-describing graph. Every object is a JSON fragment
 
 The hub is one way to store and serve these objects. It's not the only way — the format is transport-agnostic — but it's the easiest way to get started.
 
-See the [dataverse001 root node](https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) for the full data format specification.
+See the [dataverse001 root node](https://dataverse001.net/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b?ref=AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000) for the full data format specification.
 
 ## Run locally
 
