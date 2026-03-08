@@ -142,6 +142,9 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			scheme := requestScheme(r)
 			port := requestPort(r)
 			target := fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, h.Vhost.BaseDomain(), port, ref)
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}

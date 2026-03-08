@@ -765,6 +765,9 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 			scheme := requestScheme(r)
 			port := requestPort(r)
 			target := fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, p.Vhost.BaseDomain(), port, ref)
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
