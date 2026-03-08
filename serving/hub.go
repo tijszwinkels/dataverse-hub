@@ -2,6 +2,7 @@ package serving
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -60,6 +61,28 @@ func requestScheme(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+
+// requestPort returns the port suffix (e.g. ":5678") from the Host header,
+// or "" if it's the default port for the scheme (or absent).
+func requestPort(r *http.Request) string {
+	host := r.Host
+	i := strings.LastIndex(host, ":")
+	if i == -1 {
+		return ""
+	}
+	// Avoid matching IPv6 bracket notation
+	if strings.Contains(host, "]") {
+		if bi := strings.LastIndex(host, "]"); bi > i {
+			return ""
+		}
+	}
+	port := host[i:] // includes the colon
+	// Omit default ports
+	if port == ":80" || port == ":443" {
+		return ""
+	}
+	return port
 }
 
 // jsonContentType sets the Content-Type header to application/json.

@@ -181,6 +181,30 @@ func TestVhost_PageRedirect_WrongSubdomain(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestVhost_PageRedirect_PreservesPort(t *testing.T) {
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	ts, hub, cleanup := testHubWithVhost(t, "localhost", nil)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	hub.Vhost.AddPage(pageRef)
+
+	// Request PAGE from localhost:5678 → redirect should preserve port
+	resp := doGetWithHost(t, ts, "/"+pageRef, "localhost:5678", "text/html")
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 302, got %d: %s", resp.StatusCode, body)
+	}
+	loc := resp.Header.Get("Location")
+	expectedHash := vhost.PageHash(pageRef)
+	expectedLoc := fmt.Sprintf("http://%s.localhost:5678/%s", expectedHash, pageRef)
+	if loc != expectedLoc {
+		t.Errorf("redirect Location = %q, want %q", loc, expectedLoc)
+	}
+	resp.Body.Close()
+}
+
 func TestVhost_PageRedirect_CorrectSubdomain_NoRedirect(t *testing.T) {
 	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
 	hash := vhost.PageHash(pageRef)

@@ -140,7 +140,8 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		if !h.Vhost.IsPageHost(r.Host, pageRef) {
 			hash := vhost.PageHash(pageRef)
 			scheme := requestScheme(r)
-			target := fmt.Sprintf("%s://%s.%s/%s", scheme, hash, h.Vhost.BaseDomain(), ref)
+			port := requestPort(r)
+			target := fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, h.Vhost.BaseDomain(), port, ref)
 			http.Redirect(w, r, target, http.StatusFound)
 			return
 		}
