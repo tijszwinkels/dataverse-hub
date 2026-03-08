@@ -365,6 +365,9 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 
 	body, _ := io.ReadAll(resp.Body)
 
+	// Background-cache upstream items we don't have locally yet
+	go p.cacheUpstreamListRefs(body)
+
 	// If user is not authenticated, forward upstream response as-is (fast path)
 	authPK := auth.AuthPubkey(r)
 	if authPK == "" {
@@ -1013,6 +1016,33 @@ func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
 	p.CacheLocally(ref, body)
 }
 
+
+// cacheUpstreamListRefs parses a list response from upstream and triggers
+// background ensureFresh calls for items not yet in the local cache.
+// Runs sequentially with a small delay to avoid hammering upstream.
+func (p *Proxy) cacheUpstreamListRefs(body []byte) {
+	var resp object.ListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return
+	}
+
+	var cached int
+	for _, raw := range resp.Items {
+		_, ref := extractSortKey(raw)
+		if ref == "" {
+			continue
+		}
+		if _, found := p.index.GetMeta(ref); found {
+			continue // already in local cache
+		}
+		p.ensureFresh(ref)
+		cached++
+		time.Sleep(200 * time.Millisecond)
+	}
+	if cached > 0 {
+		log.Printf("[proxy] background-cached %d/%d items from upstream list", cached, len(resp.Items))
+	}
+}
 
 // encodeBase64Cursor encodes cursor bytes as base64url.
 func encodeBase64Cursor(data []byte) string {

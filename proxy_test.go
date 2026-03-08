@@ -635,6 +635,59 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	}
 }
 
+// TestProxyListCachesItemsInBackground verifies that items returned from a
+// list/inbound/search upstream response are cached locally in the background.
+func TestProxyListCachesItemsInBackground(t *testing.T) {
+	proxySrv, rootSrv, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	// PUT fixtures directly to root (proxy has no local copies)
+	fixtures := []string{"root.json", "identity.json", "core_types.json"}
+	refs := make([]string, len(fixtures))
+	for i, f := range fixtures {
+		data := loadTestFixture(t, f)
+		var env object.Envelope
+		json.Unmarshal(data, &env)
+		var item object.Item
+		json.Unmarshal(env.Item, &item)
+		refs[i] = item.Ref()
+		resp := doPut(t, rootSrv, item.Ref(), data)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("root PUT %s expected 201, got %d", f, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+
+	// Query search through proxy — triggers background caching
+	resp := doGet(t, proxySrv, "/search")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("search expected 200, got %d", resp.StatusCode)
+	}
+	var list object.ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+
+	if len(list.Items) < 3 {
+		t.Fatalf("expected at least 3 items in search, got %d", len(list.Items))
+	}
+
+	// Wait for background goroutine to finish (3 items × 200ms + fetch time)
+	// Poll by checking if the last ref is accessible after closing root.
+	time.Sleep(2 * time.Second)
+
+	// Close root hub — from now on, proxy can only serve from local cache
+	rootSrv.Close()
+
+	// Verify all items are now cached locally
+	for i, ref := range refs {
+		resp = doGet(t, proxySrv, "/"+ref)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("fixture %s (ref %s): expected 200 from cache, got %d", fixtures[i], ref, resp.StatusCode)
+		}
+		resp.Body.Close()
+	}
+}
+
 // forgeRevision patches the revision in a JSON envelope (for testing only).
 func forgeRevision(t *testing.T, data []byte, rev int) []byte {
 	t.Helper()
