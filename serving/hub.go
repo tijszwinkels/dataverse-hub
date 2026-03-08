@@ -5,6 +5,7 @@ import (
 
 	"github.com/dataverse/hub/auth"
 	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/vhost"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -16,6 +17,7 @@ type Hub struct {
 	limiter          *auth.RateLimiter
 	auth             *auth.AuthStore
 	defaultViewerRef string
+	Vhost            *vhost.Resolver // nil = vhosting disabled
 }
 
 // NewHub creates a Hub with the given components.
@@ -25,12 +27,6 @@ func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimite
 
 // Router returns the chi router with all routes and middleware.
 func (h *Hub) Router() http.Handler {
-	return h.RouterWithAuthWidget(auth.WidgetConfig{})
-}
-
-// RouterWithAuthWidget returns the chi router with auth widget support.
-// If cfg.AuthHost is empty, the widget route and CORS middleware are skipped.
-func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RealIP)
@@ -38,9 +34,6 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(h.limiter.Middleware)
 	r.Use(h.auth.Middleware)
-	if cfg.AuthHost != "" {
-		r.Use(auth.CORSMiddleware(cfg))
-	}
 	r.Use(jsonContentType)
 
 	// Auth routes
@@ -48,9 +41,7 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
 
-	if cfg.AuthHost != "" {
-		r.Get("/widget", auth.WidgetHandler(cfg))
-	}
+	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
 	r.Get("/{ref}", h.handleGetObject)
@@ -58,6 +49,17 @@ func (h *Hub) RouterWithAuthWidget(cfg auth.WidgetConfig) http.Handler {
 	r.Get("/{ref}/inbound", h.handleGetInbound)
 
 	return r
+}
+
+// requestScheme returns "https" or "http" based on X-Forwarded-Proto or TLS state.
+func requestScheme(r *http.Request) string {
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		return proto
+	}
+	if r.TLS != nil {
+		return "https"
+	}
+	return "http"
 }
 
 // jsonContentType sets the Content-Type header to application/json.

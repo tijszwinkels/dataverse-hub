@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -23,9 +22,10 @@ type Config struct {
 	DefaultViewerRef string // PAGE ref to use as default object viewer for browsers
 	BackupEnabled    bool   // keep old revisions in bk/ (default: true)
 
-	AuthWidgetHost           string        // hostname for auth widget (e.g. "auth.dataverse001.net"), empty to disable
-	AuthWidgetAllowedOrigins []string      // origins that may embed the widget (e.g. ["https://dataverse001.net"])
-	AuthTokenExpiry          time.Duration // bearer token lifetime (default: 168h = 7 days)
+	AuthTokenExpiry time.Duration // bearer token lifetime (default: 168h = 7 days)
+
+	BaseDomain  string        // e.g. "dataverse001.net", empty = vhosting disabled
+	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
 }
 
 // fileConfig mirrors Config but with pointer fields so we can distinguish
@@ -39,9 +39,9 @@ type fileConfig struct {
 	RateLimitPerDay  *int     `toml:"rate_limit_per_day"`
 	DefaultViewerRef *string  `toml:"default_viewer_ref"`
 	BackupEnabled    *bool    `toml:"backup_enabled"`
-	AuthWidgetHost   *string  `toml:"auth_widget_host"`
-	AllowedOrigins   []string `toml:"auth_widget_allowed_origins"`
-	AuthTokenExpiry  *string  `toml:"auth_token_expiry"`
+	AuthTokenExpiry *string `toml:"auth_token_expiry"`
+	BaseDomain       *string  `toml:"base_domain"`
+	TxtCacheTTL      *string  `toml:"txt_cache_ttl"`
 }
 
 // loadConfig builds the final Config by layering: defaults < TOML file < env vars.
@@ -60,6 +60,7 @@ func loadConfig() Config {
 		DefaultViewerRef: "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.b3f5a7c9-2d4e-4f60-9b8a-0c1d2e3f4a5b",
 		BackupEnabled:    true,
 		AuthTokenExpiry:  168 * time.Hour, // 7 days
+		TxtCacheTTL:      5 * time.Minute,
 	}
 
 	// 2. TOML file (if provided)
@@ -106,17 +107,21 @@ func applyFile(cfg *Config, path string) error {
 	if fc.BackupEnabled != nil {
 		cfg.BackupEnabled = *fc.BackupEnabled
 	}
-	if fc.AuthWidgetHost != nil {
-		cfg.AuthWidgetHost = *fc.AuthWidgetHost
-	}
-	if fc.AllowedOrigins != nil {
-		cfg.AuthWidgetAllowedOrigins = fc.AllowedOrigins
-	}
 	if fc.AuthTokenExpiry != nil {
 		if d, err := time.ParseDuration(*fc.AuthTokenExpiry); err == nil {
 			cfg.AuthTokenExpiry = d
 		} else {
 			log.Printf("WARN: invalid auth_token_expiry=%q, keeping %v", *fc.AuthTokenExpiry, cfg.AuthTokenExpiry)
+		}
+	}
+	if fc.BaseDomain != nil {
+		cfg.BaseDomain = *fc.BaseDomain
+	}
+	if fc.TxtCacheTTL != nil {
+		if d, err := time.ParseDuration(*fc.TxtCacheTTL); err == nil {
+			cfg.TxtCacheTTL = d
+		} else {
+			log.Printf("WARN: invalid txt_cache_ttl=%q, keeping %v", *fc.TxtCacheTTL, cfg.TxtCacheTTL)
 		}
 	}
 
@@ -156,12 +161,6 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_BACKUP_ENABLED"); v != "" {
 		cfg.BackupEnabled = v == "true"
 	}
-	if v := os.Getenv("HUB_AUTH_WIDGET_HOST"); v != "" {
-		cfg.AuthWidgetHost = v
-	}
-	if v := os.Getenv("HUB_AUTH_WIDGET_ALLOWED_ORIGINS"); v != "" {
-		cfg.AuthWidgetAllowedOrigins = splitTrim(v, ",")
-	}
 	if v := os.Getenv("HUB_AUTH_TOKEN_EXPIRY"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.AuthTokenExpiry = d
@@ -169,16 +168,15 @@ func applyEnv(cfg *Config) {
 			log.Printf("WARN: invalid HUB_AUTH_TOKEN_EXPIRY=%q, keeping %v", v, cfg.AuthTokenExpiry)
 		}
 	}
-}
-
-func splitTrim(s, sep string) []string {
-	parts := strings.Split(s, sep)
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
+	if v := os.Getenv("HUB_BASE_DOMAIN"); v != "" {
+		cfg.BaseDomain = v
+	}
+	if v := os.Getenv("HUB_TXT_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.TxtCacheTTL = d
+		} else {
+			log.Printf("WARN: invalid HUB_TXT_CACHE_TTL=%q, keeping %v", v, cfg.TxtCacheTTL)
 		}
 	}
-	return out
 }
+

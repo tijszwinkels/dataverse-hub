@@ -197,6 +197,19 @@ func (idx *Index) GetMeta(ref string) (object.ObjectMeta, bool) {
 	return m, ok
 }
 
+// GetPageRefs returns all refs that are type PAGE.
+func (idx *Index) GetPageRefs() []string {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	var refs []string
+	for ref, meta := range idx.meta {
+		if meta.Type == "PAGE" {
+			refs = append(refs, ref)
+		}
+	}
+	return refs
+}
+
 // GetInboundCounts returns a map of relation_type -> count for all inbound relations to targetRef.
 func (idx *Index) GetInboundCounts(targetRef string) map[string]int {
 	idx.mu.RLock()

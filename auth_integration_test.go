@@ -12,7 +12,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -525,37 +524,3 @@ func TestPublicObjectWithPubkeyRealmIsVisible(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestCORSHeadersIncludeAuthorization(t *testing.T) {
-	dir := t.TempDir()
-	store, _ := storage.NewStore(dir, true)
-	index := storage.NewIndex()
-	limiter := auth.NewRateLimiter(1000, 100000)
-	authStore := auth.NewAuthStore(168 * time.Hour)
-	defer limiter.Stop()
-	defer authStore.Stop()
-
-	hub := serving.NewHub(store, index, limiter, authStore, "")
-	cfg := auth.WidgetConfig{
-		AuthHost:       "auth.example.com",
-		AllowedOrigins: []string{"https://example.com"},
-	}
-	handler := hub.RouterWithAuthWidget(cfg)
-	tsSrv := httptest.NewServer(handler)
-	defer tsSrv.Close()
-
-	// OPTIONS preflight with Authorization header
-	req, _ := http.NewRequest(http.MethodOptions, tsSrv.URL+"/search", nil)
-	req.Header.Set("Origin", "https://example.com")
-	req.Header.Set("Access-Control-Request-Method", "GET")
-	req.Header.Set("Access-Control-Request-Headers", "Authorization")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("OPTIONS request failed: %v", err)
-	}
-	defer resp.Body.Close()
-
-	allowHeaders := resp.Header.Get("Access-Control-Allow-Headers")
-	if !strings.Contains(allowHeaders, "Authorization") {
-		t.Errorf("CORS Access-Control-Allow-Headers should include Authorization, got %q", allowHeaders)
-	}
-}

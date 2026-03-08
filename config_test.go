@@ -14,8 +14,6 @@ store_dir = "/data/dv"
 rate_limit_per_min = 60
 rate_limit_per_day = 5000
 backup_enabled = false
-auth_widget_host = "auth.example.com"
-auth_widget_allowed_origins = ["https://example.com", "https://app.example.com"]
 `
 	path := filepath.Join(t.TempDir(), "hub.toml")
 	if err := os.WriteFile(path, []byte(tomlContent), 0644); err != nil {
@@ -52,12 +50,6 @@ auth_widget_allowed_origins = ["https://example.com", "https://app.example.com"]
 	}
 	if cfg.BackupEnabled {
 		t.Errorf("BackupEnabled = true, want false")
-	}
-	if cfg.AuthWidgetHost != "auth.example.com" {
-		t.Errorf("AuthWidgetHost = %q, want %q", cfg.AuthWidgetHost, "auth.example.com")
-	}
-	if len(cfg.AuthWidgetAllowedOrigins) != 2 || cfg.AuthWidgetAllowedOrigins[0] != "https://example.com" {
-		t.Errorf("AllowedOrigins = %v, want [https://example.com, https://app.example.com]", cfg.AuthWidgetAllowedOrigins)
 	}
 }
 

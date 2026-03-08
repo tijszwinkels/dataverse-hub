@@ -14,6 +14,7 @@ import (
 	"github.com/dataverse/hub/serving"
 	"github.com/dataverse/hub/storage"
 	"github.com/dataverse/hub/upstream"
+	"github.com/dataverse/hub/vhost"
 )
 
 func main() {
@@ -34,6 +35,21 @@ func main() {
 	}
 	log.Printf("Index rebuilt: %d objects in %v", count, dur)
 
+	// Build vhost resolver if BaseDomain is configured
+	var resolver *vhost.Resolver
+	if cfg.BaseDomain != "" {
+		resolver = vhost.NewResolver(cfg.BaseDomain, cfg.TxtCacheTTL, nil)
+
+		// Build hash map from indexed PAGE objects
+		pageRefs := index.GetPageRefs()
+		pageHashes := make(map[string]string, len(pageRefs))
+		for _, ref := range pageRefs {
+			pageHashes[vhost.PageHash(ref)] = ref
+		}
+		resolver.UpdateHashMap(pageHashes)
+		log.Printf("Vhost enabled: base_domain=%s, %d PAGEs mapped", cfg.BaseDomain, len(pageHashes))
+	}
+
 	limiter := auth.NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
@@ -44,20 +60,12 @@ func main() {
 	var handler http.Handler
 	var proxyCleanup []func() // cleanup functions for proxy mode
 
-	// Auth widget config
-	awCfg := auth.WidgetConfig{
-		AuthHost:       cfg.AuthWidgetHost,
-		AllowedOrigins: cfg.AuthWidgetAllowedOrigins,
-	}
-	if awCfg.AuthHost != "" {
-		log.Printf("Auth widget enabled on %s", awCfg.AuthHost)
-	}
-
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
 		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef)
-		handler = hub.RouterWithAuthWidget(awCfg)
+		hub.Vhost = resolver
+		handler = hub.Router()
 
 	default: // "proxy" is the default
 		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
@@ -79,7 +87,8 @@ func main() {
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
 		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending)
-		handler = proxy.RouterWithAuthWidget(awCfg)
+		proxy.Vhost = resolver
+		handler = proxy.Router()
 	}
 
 	srv := &http.Server{

@@ -14,13 +14,58 @@ import (
 	"github.com/dataverse/hub/object"
 	"github.com/dataverse/hub/realm"
 	"github.com/dataverse/hub/storage"
+	"github.com/dataverse/hub/vhost"
 	"github.com/go-chi/chi/v5"
 )
 
 const maxBodySize = 10 << 20 // 10 MB
 
-// handleRoot serves GET / — redirects to the ROOT object.
+// handleRoot serves GET / — with vhosting, resolves Host to a PAGE.
+// Without vhosting (legacy), redirects to the ROOT object.
 func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if h.Vhost == nil {
+		h.handleRootLegacy(w, r)
+		return
+	}
+
+	resolved := h.Vhost.Resolve(r.Host)
+	switch {
+	case resolved == "":
+		// Bare domain or unknown host — existing behavior
+		h.handleRootLegacy(w, r)
+
+	default:
+		// ETag/304 check via index (no disk I/O)
+		if meta, found := h.index.GetMeta(resolved); found {
+			etag := `"` + strconv.Itoa(meta.Revision) + `-html"`
+			w.Header().Set("Vary", "Accept")
+			w.Header().Set("ETag", etag)
+			if r.Header.Get("If-None-Match") == etag {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
+
+		// Serve PAGE from resolved ref
+		data, err := h.store.Read(resolved)
+		if err != nil || data == nil {
+			log.Printf("WARN: vhost root: page %s not found", resolved)
+			writeError(w, http.StatusNotFound, "page not found", "NOT_FOUND")
+			return
+		}
+		html := h.resolvePageHTML(data)
+		if html == "" {
+			writeError(w, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, injectBaseDomain(html, h.baseDomain()))
+	}
+}
+
+// handleRootLegacy is the original root handler: redirect to ROOT object.
+func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 	metas := h.index.GetAll("", "ROOT", "")
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
@@ -86,6 +131,21 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		etag = etag[:len(etag)-1] + `-blob"`
 	}
 
+	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
+	if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
+		pageRef := ref
+		if meta.HasPageRelation && meta.PageRef != "" {
+			pageRef = meta.PageRef
+		}
+		if !h.Vhost.IsPageHost(r.Host, pageRef) {
+			hash := vhost.PageHash(pageRef)
+			scheme := requestScheme(r)
+			target := fmt.Sprintf("%s://%s.%s/%s", scheme, hash, h.Vhost.BaseDomain(), ref)
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+	}
+
 	w.Header().Set("Vary", "Accept")
 	w.Header().Set("ETag", etag)
 
@@ -129,7 +189,7 @@ func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, da
 		if html != "" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, html)
+			io.WriteString(w, injectBaseDomain(html, h.baseDomain()))
 			return
 		}
 	}
@@ -242,6 +302,12 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Update index (pass realms for visibility tracking)
 	h.index.Update(ref, item, ts, realms)
+
+	// Update vhost hash map for PAGE objects
+	if h.Vhost != nil && item.Type == "PAGE" {
+		h.Vhost.AddPage(ref)
+	}
+
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 	if isUpdate {
@@ -529,6 +595,56 @@ func parseCursor(s string) *object.Cursor {
 func writeError(w http.ResponseWriter, status int, msg, code string) {
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
+}
+
+// baseDomain returns the hub's base domain if vhosting is configured.
+func (h *Hub) baseDomain() string {
+	if h.Vhost != nil {
+		return h.Vhost.BaseDomain()
+	}
+	return ""
+}
+
+// injectBaseDomain inserts a <meta name="dv-base-domain"> tag into PAGE HTML.
+// If baseDomain is empty, returns html unchanged.
+func injectBaseDomain(html, baseDomain string) string {
+	if baseDomain == "" {
+		return html
+	}
+	tag := `<meta name="dv-base-domain" content="` + baseDomain + `">`
+	idx := strings.Index(strings.ToLower(html), "<head")
+	if idx >= 0 {
+		if close := strings.IndexByte(html[idx:], '>'); close >= 0 {
+			pos := idx + close + 1
+			return html[:pos] + "\n" + tag + html[pos:]
+		}
+	}
+	return tag + "\n" + html
+}
+
+// TLSAskHandler returns an http.HandlerFunc for Caddy's on-demand TLS "ask"
+// endpoint. It validates the requested domain against the vhost resolver:
+// known PAGE hash subdomains and custom domains with _dv. TXT records are
+// approved (200), everything else is rejected (403).
+func TLSAskHandler(resolver *vhost.Resolver) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		domain := r.URL.Query().Get("domain")
+		if domain == "" {
+			http.Error(w, "missing domain param", http.StatusBadRequest)
+			return
+		}
+		if resolver == nil {
+			log.Printf("TLS ask: rejected %q (vhosting disabled)", domain)
+			http.Error(w, "vhosting disabled", http.StatusForbidden)
+			return
+		}
+		if resolver.Resolve(domain) != "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		log.Printf("TLS ask: rejected %q", domain)
+		http.Error(w, "unknown domain", http.StatusForbidden)
+	}
 }
 
 func writeList(w http.ResponseWriter, items []json.RawMessage, cursor *string, hasMore bool) {
