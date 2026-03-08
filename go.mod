@@ -1,4 +1,4 @@
-module github.com/dataverse/hub
+module github.com/tijszwinkels/dataverse-hub
 
 go 1.22
 

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/realm"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 )
 
 // Index is an in-memory index for fast relation lookups and filtering.

@@ -10,11 +10,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dataverse/hub/auth"
-	"github.com/dataverse/hub/serving"
-	"github.com/dataverse/hub/storage"
-	"github.com/dataverse/hub/upstream"
-	"github.com/dataverse/hub/vhost"
+	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/upstream"
+	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
 func main() {

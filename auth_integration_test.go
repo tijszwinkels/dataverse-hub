@@ -15,10 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dataverse/hub/auth"
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/storage"
-	"github.com/dataverse/hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/serving"
 )
 
 // signedObject creates a properly signed dataverse001 envelope for testing.

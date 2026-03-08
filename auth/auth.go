@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dataverse/hub/object"
+	"github.com/tijszwinkels/dataverse-hub/object"
 )
 
 // AuthStore manages challenges and bearer tokens in memory.

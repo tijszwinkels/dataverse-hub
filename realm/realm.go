@@ -1,6 +1,6 @@
 package realm
 
-import "github.com/dataverse/hub/object"
+import "github.com/tijszwinkels/dataverse-hub/object"
 
 // IsPublicObject checks if the object belongs to the public dataverse001 realm.
 func IsPublicObject(realms object.InField) bool {

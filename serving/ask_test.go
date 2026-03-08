@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dataverse/hub/vhost"
+	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
 func TestTLSAskHandler(t *testing.T) {

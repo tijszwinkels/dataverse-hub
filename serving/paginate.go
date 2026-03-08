@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"log"
 
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 )
 
 // paginateAndLoad applies cursor-based pagination to metas, loads data from store,

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 )
 
 // SyncPending manages a folder of objects that failed to push to upstream

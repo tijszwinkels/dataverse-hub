@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dataverse/hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 )
 
 func TestSyncPendingAddListRemove(t *testing.T) {

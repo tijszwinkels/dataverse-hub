@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dataverse/hub/object"
+	"github.com/tijszwinkels/dataverse-hub/object"
 )
 
 // testKeypair generates a fresh P-256 keypair for testing.

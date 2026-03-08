@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/dataverse/hub/vhost"
+	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
 func main() {

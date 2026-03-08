@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dataverse/hub/auth"
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/storage"
-	"github.com/dataverse/hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/serving"
 )
 
 // testHub creates a Hub with a temp store directory and returns the server + cleanup func.

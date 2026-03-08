@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dataverse/hub/auth"
-	"github.com/dataverse/hub/object"
-	"github.com/dataverse/hub/realm"
-	"github.com/dataverse/hub/storage"
-	"github.com/dataverse/hub/vhost"
+	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/realm"
+	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/vhost"
 	"github.com/go-chi/chi/v5"
 )
 

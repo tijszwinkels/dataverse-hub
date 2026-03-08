@@ -3,7 +3,7 @@ package realm
 import (
 	"testing"
 
-	"github.com/dataverse/hub/object"
+	"github.com/tijszwinkels/dataverse-hub/object"
 )
 
 func TestIsPublicObject(t *testing.T) {
