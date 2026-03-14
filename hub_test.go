@@ -13,6 +13,7 @@ import (
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 )
@@ -27,10 +28,11 @@ func testHub(t *testing.T) (*httptest.Server, func()) {
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex()
+	shared := realm.NewSharedRealms()
+	index := storage.NewIndex(shared)
 	limiter := auth.NewRateLimiter(1000, 100000) // generous limits for tests
 	auth := auth.NewAuthStore(168 * time.Hour)
-	hub := serving.NewHub(store, index, limiter, auth, "")
+	hub := serving.NewHub(store, index, limiter, auth, "", shared)
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, func() {
@@ -315,7 +317,7 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 	}
 
 	store, _ := storage.NewStore(dir, true)
-	index := storage.NewIndex()
+	index := storage.NewIndex(realm.NewSharedRealms())
 	count, _, err := index.Rebuild(store)
 	if err != nil {
 		t.Fatal(err)
@@ -326,7 +328,7 @@ func TestInboundRelationsWithStoredFixtures(t *testing.T) {
 
 	// Check that root has inbound relations
 	rootRef := fixtures["root.json"]
-	inbound := index.GetInbound(rootRef, storage.InboundFilters{}, "")
+	inbound := index.GetInbound(rootRef, storage.InboundFilters{}, "", false)
 	if len(inbound) == 0 {
 		t.Error("expected inbound relations to root after rebuild")
 	}

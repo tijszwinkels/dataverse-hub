@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 )
 
@@ -96,7 +97,7 @@ func TestSyncPendingDrainPushesAndRemoves(t *testing.T) {
 
 	storeDir := t.TempDir()
 	store, _ := storage.NewStore(storeDir, true)
-	index := storage.NewIndex()
+	index := storage.NewIndex(realm.NewSharedRealms())
 
 	sp := NewSyncPending(dir, client, store, index)
 

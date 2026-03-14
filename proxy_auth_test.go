@@ -18,8 +18,9 @@ import (
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
-	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/upstream"
 )
 
@@ -35,14 +36,14 @@ func testProxyWithAuth(t *testing.T) (*httptest.Server, *auth.AuthStore, *storag
 
 	dir := t.TempDir()
 	store, _ := storage.NewStore(dir, true)
-	index := storage.NewIndex()
+	index := storage.NewIndex(realm.NewSharedRealms())
 	limiter := auth.NewRateLimiter(10000, 1000000)
 	auth := auth.NewAuthStore(168 * time.Hour)
 	up := upstream.NewClient(fakeUpstream.URL)
 	pendingDir := filepath.Join(dir, "sync_pending")
 	pending := upstream.NewSyncPending(pendingDir, up, store, index)
 
-	proxy := serving.NewProxy(store, index, limiter, auth, "", up, pending)
+	proxy := serving.NewProxy(store, index, limiter, auth, "", up, pending, realm.NewSharedRealms())
 	ts := httptest.NewServer(proxy.Router())
 
 	return ts, auth, store, index, func() {
@@ -61,23 +62,23 @@ func testProxyWithRealUpstream(t *testing.T) (proxy *httptest.Server, upstreamSr
 	// Create a real upstream hub
 	upstreamDir := t.TempDir()
 	upstreamStore, _ := storage.NewStore(upstreamDir, true)
-	upstreamIndex := storage.NewIndex()
+	upstreamIndex := storage.NewIndex(realm.NewSharedRealms())
 	upstreamLimiter := auth.NewRateLimiter(10000, 1000000)
 	upstreamAuth := auth.NewAuthStore(168 * time.Hour)
-	upstreamHub := serving.NewHub(upstreamStore, upstreamIndex, upstreamLimiter, upstreamAuth, "")
+	upstreamHub := serving.NewHub(upstreamStore, upstreamIndex, upstreamLimiter, upstreamAuth, "", realm.NewSharedRealms())
 	upstreamSrv = httptest.NewServer(upstreamHub.Router())
 
 	// Create proxy pointing at real upstream
 	proxyDir := t.TempDir()
 	proxyStore, _ = storage.NewStore(proxyDir, true)
-	proxyIndex = storage.NewIndex()
+	proxyIndex = storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	up := upstream.NewClient(upstreamSrv.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	p := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	p := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxy = httptest.NewServer(p.Router())
 
 	cleanup = func() {

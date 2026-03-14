@@ -28,6 +28,7 @@ type Proxy struct {
 	limiter          *auth.RateLimiter
 	auth             *auth.AuthStore
 	defaultViewerRef string
+	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 
 	upstream *upstream.Client
@@ -35,7 +36,7 @@ type Proxy struct {
 }
 
 // NewProxy creates a Proxy with the given components.
-func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string, up *upstream.Client, pending *upstream.SyncPending) *Proxy {
+func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string, up *upstream.Client, pending *upstream.SyncPending, shared *realm.SharedRealms) *Proxy {
 	return &Proxy{
 		store:            store,
 		index:            index,
@@ -44,6 +45,7 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 		defaultViewerRef: defaultViewerRef,
 		upstream:         up,
 		pending:          pending,
+		shared:           shared,
 	}
 }
 
@@ -70,6 +72,7 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/auth/challenge", p.auth.HandleChallenge)
 	r.Post("/auth/token", p.auth.HandleToken)
 	r.Post("/auth/logout", p.auth.HandleLogout)
+	r.Get("/auth/realms", handleAuthRealms(p.shared))
 
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
@@ -124,7 +127,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleRootLegacy redirects to the ROOT object from local index.
 func (p *Proxy) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
-	metas := p.index.GetAll("", "ROOT", "")
+	metas := p.index.GetAll("", "ROOT", "", false)
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
@@ -228,8 +231,20 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 	realms := object.ResolveIn(env, item)
 	if !realms.Contains("dataverse001") && len(object.PubkeyRealms(realms)) == 0 {
-		writeError(w, http.StatusBadRequest, "missing or wrong 'in' marker", "INVALID_OBJECT")
-		return
+		// Check for configured shared realm
+		hasSharedRealm := false
+		for _, r := range realms {
+			if p.shared != nil && p.shared.IsSharedRealm(r) {
+				hasSharedRealm = true
+				break
+			}
+		}
+		if !hasSharedRealm {
+			writeError(w, http.StatusBadRequest,
+				"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+				"INVALID_OBJECT")
+			return
+		}
 	}
 
 	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
@@ -396,6 +411,7 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	// Determine if this is a search or inbound request based on path
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
+	membersOnly := q.Get("members_only") != "false"
 
 	authPK := auth.AuthPubkey(r)
 	var metas []object.ObjectMeta
@@ -406,10 +422,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
 		}
-		metas = p.index.GetInbound(ref, filters, authPK)
+		metas = p.index.GetInbound(ref, filters, authPK, membersOnly)
 	} else {
 		// Search
-		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK, membersOnly)
 	}
 
 	limit := parseLimit(q.Get("limit"), 50, 200)
@@ -431,6 +447,7 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 	q := r.URL.Query()
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
+	membersOnly := q.Get("members_only") != "false"
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
 
@@ -442,9 +459,9 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 			From:     q.Get("from"),
 			Type:     q.Get("type"),
 		}
-		metas = p.index.GetInbound(ref, filters, authPK)
+		metas = p.index.GetInbound(ref, filters, authPK, membersOnly)
 	} else {
-		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK)
+		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK, membersOnly)
 	}
 
 	// Filter to private-only objects (upstream already has public ones)
@@ -726,7 +743,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	// Private object access check
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
-		if !realm.HasMatchingRealm(meta.Realms, authPK) {
+		if !realm.CanRead(meta.Realms, authPK, p.shared) {
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
