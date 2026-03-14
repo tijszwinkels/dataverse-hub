@@ -28,7 +28,8 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex(realm.NewSharedRealms())
+	shared := realm.NewSharedRealms()
+	index := storage.NewIndex(shared)
 	limiter := auth.NewRateLimiter(1000, 100000)
 	authStore := auth.NewAuthStore(168 * time.Hour)
 
@@ -40,7 +41,7 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 	}
 	resolver := vhost.NewResolver(baseDomain, 5*time.Minute, dns)
 
-	hub := serving.NewHub(store, index, limiter, authStore, "", realm.NewSharedRealms())
+	hub := serving.NewHub(store, index, limiter, authStore, "", shared)
 	hub.Vhost = resolver
 
 	ts := httptest.NewServer(hub.Router())

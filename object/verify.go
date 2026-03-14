@@ -13,9 +13,9 @@ import (
 	"math/big"
 )
 
-// VerifyEnvelope validates a signed dataverse001 envelope.
-// It checks the magic marker, required fields, and ECDSA P-256 signature.
-// Accepts both old format (in on envelope) and new format (in inside item).
+// VerifyEnvelope validates a signed instructionGraph001 envelope.
+// Checks required fields (in, pubkey, id, created_at) and ECDSA P-256 signature.
+// Does NOT enforce realm policy — that is the handler's responsibility.
 func VerifyEnvelope(data []byte) error {
 	var env Envelope
 	if err := json.Unmarshal(data, &env); err != nil {

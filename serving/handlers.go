@@ -236,24 +236,11 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
-	if !realms.Contains("dataverse001") {
-		hasValidRealm := false
-		for _, r := range realms {
-			if object.IsPubkeyRealm(r) && r == item.Pubkey {
-				hasValidRealm = true
-				break
-			}
-			if h.shared != nil && h.shared.IsSharedRealm(r) {
-				hasValidRealm = true
-				break
-			}
-		}
-		if !hasValidRealm {
-			writeError(w, http.StatusBadRequest,
-				"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
-				"INVALID_OBJECT")
-			return
-		}
+	if !realm.ValidateRealmsForPut(realms, item.Pubkey, h.shared) {
+		writeError(w, http.StatusBadRequest,
+			"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+			"INVALID_OBJECT")
+		return
 	}
 
 	// Check ref matches

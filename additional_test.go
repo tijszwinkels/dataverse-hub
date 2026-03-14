@@ -746,10 +746,11 @@ func testHubWithDir(t *testing.T, dir string) (*httptest.Server, func()) {
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex(realm.NewSharedRealms())
+	shared := realm.NewSharedRealms()
+	index := storage.NewIndex(shared)
 	limiter := auth.NewRateLimiter(1000, 100000)
 	authSt := auth.NewAuthStore(168 * time.Hour)
-	hub := serving.NewHub(store, index, limiter, authSt, "", realm.NewSharedRealms())
+	hub := serving.NewHub(store, index, limiter, authSt, "", shared)
 
 	server := httptest.NewServer(hub.Router())
 	return server, func() {

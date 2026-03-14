@@ -230,22 +230,6 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	realms := object.ResolveIn(env, item)
-	if !realms.Contains("dataverse001") && len(object.PubkeyRealms(realms)) == 0 {
-		// Check for configured shared realm
-		hasSharedRealm := false
-		for _, r := range realms {
-			if p.shared != nil && p.shared.IsSharedRealm(r) {
-				hasSharedRealm = true
-				break
-			}
-		}
-		if !hasSharedRealm {
-			writeError(w, http.StatusBadRequest,
-				"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
-				"INVALID_OBJECT")
-			return
-		}
-	}
 
 	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
 	for _, pr := range object.PubkeyRealms(realms) {
@@ -255,6 +239,14 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 				"REALM_FORBIDDEN")
 			return
 		}
+	}
+
+	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
+	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.shared) {
+		writeError(w, http.StatusBadRequest,
+			"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+			"INVALID_OBJECT")
+		return
 	}
 	if ref != item.Ref() {
 		writeError(w, http.StatusBadRequest,

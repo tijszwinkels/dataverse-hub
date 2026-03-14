@@ -129,7 +129,8 @@ func main() {
 				continue
 			}
 			if realms == nil {
-				realms = make(map[string][]string)
+				log.Println("No [realms] section in config, keeping previous config")
+				continue
 			}
 			shared.Load(realms)
 			log.Printf("Reloaded shared realms: %d realms configured", shared.Count())

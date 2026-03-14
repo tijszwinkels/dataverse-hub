@@ -124,6 +124,42 @@ func TestSharedRealms_LoadReplacesConfig(t *testing.T) {
 	}
 }
 
+func TestValidateRealmsForPut(t *testing.T) {
+	// Use realistic 44-char base64url pubkeys (valid compressed P-256 points start with 02 or 03)
+	pk := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"
+	otherPK := "A6yU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"
+
+	shared := NewSharedRealms()
+	shared.Load(map[string][]string{
+		pk + ".acme-team": {pk, otherPK},
+	})
+
+	tests := []struct {
+		name         string
+		realms       []string
+		signerPubkey string
+		shared       *SharedRealms
+		want         bool
+	}{
+		{"dataverse001", []string{"dataverse001"}, pk, shared, true},
+		{"self-owned pubkey-realm", []string{pk}, pk, shared, true},
+		{"other pubkey-realm", []string{otherPK}, pk, shared, false},
+		{"configured shared realm", []string{pk + ".acme-team"}, "charlie", shared, true},
+		{"unconfigured realm", []string{"pk.unknown"}, pk, shared, false},
+		{"dataverse001 + shared", []string{"dataverse001", pk + ".acme-team"}, "x", shared, true},
+		{"empty realms", []string{}, pk, shared, false},
+		{"nil shared config", []string{pk + ".acme-team"}, pk, nil, false},
+		{"nil shared dataverse001", []string{"dataverse001"}, pk, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ValidateRealmsForPut(tt.realms, tt.signerPubkey, tt.shared); got != tt.want {
+				t.Errorf("ValidateRealmsForPut(%v, %q) = %v, want %v", tt.realms, tt.signerPubkey, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCanRead(t *testing.T) {
 	shared := NewSharedRealms()
 	shared.Load(map[string][]string{

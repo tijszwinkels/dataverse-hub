@@ -20,6 +20,24 @@ func HasMatchingRealm(realms []string, authPubkey string) bool {
 	return false
 }
 
+// ValidateRealmsForPut checks that at least one realm is acceptable for storage.
+// Accepts: "dataverse001", a self-owned pubkey-realm (matches signerPubkey),
+// or a configured shared realm. Returns true if valid.
+func ValidateRealmsForPut(realms []string, signerPubkey string, shared *SharedRealms) bool {
+	for _, r := range realms {
+		if r == "dataverse001" {
+			return true
+		}
+		if object.IsPubkeyRealm(r) && r == signerPubkey {
+			return true
+		}
+		if shared != nil && shared.IsSharedRealm(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // CanRead checks if the given pubkey can read an object with these realms.
 // Public objects are always readable. Private objects require matching
 // pubkey-realm or shared-realm membership.

@@ -84,10 +84,11 @@ func testHubWithAuth(t *testing.T) (*httptest.Server, *auth.AuthStore, func()) {
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex(realm.NewSharedRealms())
+	shared := realm.NewSharedRealms()
+	index := storage.NewIndex(shared)
 	limiter := auth.NewRateLimiter(1000, 100000)
 	auth := auth.NewAuthStore(168 * time.Hour)
-	hub := serving.NewHub(store, index, limiter, auth, "", realm.NewSharedRealms())
+	hub := serving.NewHub(store, index, limiter, auth, "", shared)
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, auth, func() {

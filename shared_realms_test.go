@@ -336,6 +336,149 @@ func TestAuthRealms_EmptyForNonMember(t *testing.T) {
 	}
 }
 
+// --- Mixed-realm test: all realm types in one store ---
+
+func TestMixedRealms_AllTypesInOneStore(t *testing.T) {
+	ownerPriv, ownerPubkey := testKeypair(t)
+	memberPriv, memberPubkey := testKeypair(t)
+	outsiderPriv, outsiderPubkey := testKeypair(t)
+	sharedRealm := ownerPubkey + ".team"
+
+	ts, _, cleanup := testHubWithSharedRealms(t, map[string][]string{
+		sharedRealm: {ownerPubkey, memberPubkey},
+	})
+	defer cleanup()
+
+	// 1. Public object (dataverse001)
+	pubID := "f0000001-0001-4001-8001-000000000001"
+	pubRef := ownerPubkey + "." + pubID
+	pubData := signedObject(t, ownerPriv, ownerPubkey, pubID, []string{"dataverse001"}, "POST")
+	resp := doPut(t, ts, pubRef, pubData)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT public: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+
+	// 2. Private object (pubkey-realm)
+	privID := "f0000002-0002-4002-8002-000000000002"
+	privRef := ownerPubkey + "." + privID
+	privData := signedObject(t, ownerPriv, ownerPubkey, privID, []string{ownerPubkey}, "NOTE")
+	resp = doPut(t, ts, privRef, privData)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT private: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 3. Shared realm object (by owner)
+	sharedID := "f0000003-0003-4003-8003-000000000003"
+	sharedRef := ownerPubkey + "." + sharedID
+	sharedData := signedObject(t, ownerPriv, ownerPubkey, sharedID, []string{sharedRealm}, "NOTE")
+	resp = doPut(t, ts, sharedRef, sharedData)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT shared: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 4. Shared realm object by non-member (write accepted, filtered by members_only)
+	outsiderID := "f0000004-0004-4004-8004-000000000004"
+	outsiderRef := outsiderPubkey + "." + outsiderID
+	outsiderData := signedObject(t, outsiderPriv, outsiderPubkey, outsiderID, []string{sharedRealm}, "NOTE")
+	resp = doPut(t, ts, outsiderRef, outsiderData)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT outsider shared: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// 5. Public + shared (dual realm)
+	dualID := "f0000005-0005-4005-8005-000000000005"
+	dualRef := ownerPubkey + "." + dualID
+	dualData := signedObject(t, ownerPriv, ownerPubkey, dualID, []string{"dataverse001", sharedRealm}, "POST")
+	resp = doPut(t, ts, dualRef, dualData)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT dual realm: expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// --- Unauthenticated: sees public + dual only ---
+	resp = doGet(t, ts, "/search?members_only=false")
+	var list object.ListResponse
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Items) != 2 {
+		t.Fatalf("unauth search: expected 2 (public+dual), got %d", len(list.Items))
+	}
+
+	// --- Authenticate as member ---
+	memberToken := authenticateAs(t, ts, memberPriv, memberPubkey)
+
+	// Member sees: public(1) + shared(1) + dual(1) = 3 (members_only filters outsider)
+	resp = doGetWithToken(t, ts, "/search", memberToken)
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Items) != 3 {
+		t.Fatalf("member search (members_only=true): expected 3, got %d", len(list.Items))
+	}
+
+	// Member sees all 4 non-private with members_only=false
+	resp = doGetWithToken(t, ts, "/search?members_only=false", memberToken)
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Items) != 4 {
+		t.Fatalf("member search (members_only=false): expected 4, got %d", len(list.Items))
+	}
+
+	// --- Authenticate as owner ---
+	ownerToken := authenticateAs(t, ts, ownerPriv, ownerPubkey)
+
+	// Owner sees: public(1) + private(1) + shared(1) + dual(1) = 4 (members_only filters outsider)
+	resp = doGetWithToken(t, ts, "/search", ownerToken)
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Items) != 4 {
+		t.Fatalf("owner search (members_only=true): expected 4, got %d", len(list.Items))
+	}
+
+	// Owner with members_only=false sees all 5
+	resp = doGetWithToken(t, ts, "/search?members_only=false", ownerToken)
+	json.NewDecoder(resp.Body).Decode(&list)
+	resp.Body.Close()
+	if len(list.Items) != 5 {
+		t.Fatalf("owner search (members_only=false): expected 5, got %d", len(list.Items))
+	}
+
+	// --- Authenticate as outsider ---
+	outsiderToken := authenticateAs(t, ts, outsiderPriv, outsiderPubkey)
+
+	// Outsider can GET the public object
+	resp = doGetWithToken(t, ts, "/"+pubRef, outsiderToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("outsider GET public: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Outsider CANNOT GET the shared realm object (not a member)
+	resp = doGetWithToken(t, ts, "/"+sharedRef, outsiderToken)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("outsider GET shared: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Outsider CANNOT GET the private object
+	resp = doGetWithToken(t, ts, "/"+privRef, outsiderToken)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("outsider GET private: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Outsider CAN GET the dual-realm object (it's in dataverse001)
+	resp = doGetWithToken(t, ts, "/"+dualRef, outsiderToken)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("outsider GET dual: expected 200, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
 // --- Hot reload ---
 
 func TestSharedRealms_HotReload(t *testing.T) {
