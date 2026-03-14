@@ -42,10 +42,18 @@ type fileConfig struct {
 	AuthTokenExpiry *string `toml:"auth_token_expiry"`
 	BaseDomain       *string  `toml:"base_domain"`
 	TxtCacheTTL      *string  `toml:"txt_cache_ttl"`
+
+	Realms map[string]realmConfig `toml:"realms"`
+}
+
+// realmConfig holds the config for a single shared realm.
+type realmConfig struct {
+	Members []string `toml:"members"`
 }
 
 // loadConfig builds the final Config by layering: defaults < TOML file < env vars.
-func loadConfig() Config {
+// Returns the config and the config file path (empty if none provided).
+func loadConfig() (Config, string) {
 	configPath := flag.String("config", "", "path to TOML config file")
 	flag.Parse()
 
@@ -75,7 +83,27 @@ func loadConfig() Config {
 	// 3. Env vars override
 	applyEnv(&cfg)
 
-	return cfg
+	return cfg, *configPath
+}
+
+// loadRealmsFromFile parses the TOML config and returns the shared realm map.
+// Returns nil map (not error) if no realms are configured.
+func loadRealmsFromFile(path string) (map[string][]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	var fc fileConfig
+	if _, err := toml.DecodeFile(path, &fc); err != nil {
+		return nil, fmt.Errorf("parsing TOML: %w", err)
+	}
+	if len(fc.Realms) == 0 {
+		return nil, nil
+	}
+	result := make(map[string][]string, len(fc.Realms))
+	for name, rc := range fc.Realms {
+		result[name] = rc.Members
+	}
+	return result, nil
 }
 
 func applyFile(cfg *Config, path string) error {

@@ -1,10 +1,12 @@
 package serving
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
 	"github.com/go-chi/chi/v5"
@@ -18,12 +20,13 @@ type Hub struct {
 	limiter          *auth.RateLimiter
 	auth             *auth.AuthStore
 	defaultViewerRef string
+	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 }
 
 // NewHub creates a Hub with the given components.
-func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string) *Hub {
-	return &Hub{store: store, index: index, limiter: limiter, auth: auth, defaultViewerRef: defaultViewerRef}
+func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string, shared *realm.SharedRealms) *Hub {
+	return &Hub{store: store, index: index, limiter: limiter, auth: auth, defaultViewerRef: defaultViewerRef, shared: shared}
 }
 
 // Router returns the chi router with all routes and middleware.
@@ -41,6 +44,7 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/auth/challenge", h.auth.HandleChallenge)
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
+	r.Get("/auth/realms", handleAuthRealms(h.shared))
 
 	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
@@ -50,6 +54,25 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/{ref}/inbound", h.handleGetInbound)
 
 	return r
+}
+
+// handleAuthRealms returns a handler for GET /auth/realms.
+// Returns the shared realms the authenticated user belongs to.
+func handleAuthRealms(shared *realm.SharedRealms) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authPK := auth.AuthPubkey(r)
+		if authPK == "" {
+			writeError(w, http.StatusUnauthorized, "authentication required", "UNAUTHORIZED")
+			return
+		}
+		realms := shared.RealmsForPubkey(authPK)
+		if realms == nil {
+			realms = []string{}
+		}
+		json.NewEncoder(w).Encode(map[string][]string{
+			"realms": realms,
+		})
+	}
 }
 
 // requestScheme returns "https" or "http" based on X-Forwarded-Proto or TLS state.

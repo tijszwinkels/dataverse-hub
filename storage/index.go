@@ -18,14 +18,16 @@ type Index struct {
 	inbound  map[string][]object.RelationEntry // target_ref -> sources pointing at it
 	byPubkey map[string][]string               // pubkey -> refs owned by that key
 	meta     map[string]object.ObjectMeta      // ref -> metadata
+	shared   *realm.SharedRealms               // shared realm config (for access checks)
 }
 
 // NewIndex creates an empty index.
-func NewIndex() *Index {
+func NewIndex(shared *realm.SharedRealms) *Index {
 	return &Index{
 		inbound:  make(map[string][]object.RelationEntry),
 		byPubkey: make(map[string][]string),
 		meta:     make(map[string]object.ObjectMeta),
+		shared:   shared,
 	}
 }
 
@@ -108,7 +110,8 @@ func (idx *Index) Update(ref string, item *object.Item, ts time.Time, realms ...
 
 // GetInbound returns metadata of objects pointing at targetRef, filtered.
 // authPubkey controls visibility of private objects (empty = public only).
-func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubkey string) []object.ObjectMeta {
+// membersOnly filters out non-member contributions in shared realms (default true).
+func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubkey string, membersOnly bool) []object.ObjectMeta {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
@@ -122,7 +125,10 @@ func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubke
 		if !ok {
 			continue
 		}
-		if !m.IsPublic && !realm.HasMatchingRealm(m.Realms, authPubkey) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+			continue
+		}
+		if membersOnly && !idx.passesMembersOnlyFilter(m) {
 			continue
 		}
 		if filters.From != "" && m.Pubkey != filters.From {
@@ -140,7 +146,7 @@ func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubke
 
 // GetByPubkey returns metadata of objects owned by the given pubkey, optionally filtered by type.
 // authPubkey controls visibility of private objects (empty = public only).
-func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string) []object.ObjectMeta {
+func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string, membersOnly bool) []object.ObjectMeta {
 	idx.mu.RLock()
 	defer idx.mu.RUnlock()
 
@@ -151,7 +157,10 @@ func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string) []object.Ob
 		if !ok {
 			continue
 		}
-		if !m.IsPublic && !realm.HasMatchingRealm(m.Realms, authPubkey) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+			continue
+		}
+		if membersOnly && !idx.passesMembersOnlyFilter(m) {
 			continue
 		}
 		if typeFilter != "" && m.Type != typeFilter {
@@ -166,9 +175,9 @@ func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string) []object.Ob
 
 // GetAll returns all object metadata, optionally filtered by pubkey and/or type.
 // authPubkey controls visibility of private objects (empty = public only).
-func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string) []object.ObjectMeta {
+func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string, membersOnly bool) []object.ObjectMeta {
 	if pubkey != "" {
-		return idx.GetByPubkey(pubkey, typeFilter, authPubkey)
+		return idx.GetByPubkey(pubkey, typeFilter, authPubkey, membersOnly)
 	}
 
 	idx.mu.RLock()
@@ -176,7 +185,10 @@ func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string) []object.ObjectM
 
 	var result []object.ObjectMeta
 	for _, m := range idx.meta {
-		if !m.IsPublic && !realm.HasMatchingRealm(m.Realms, authPubkey) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+			continue
+		}
+		if membersOnly && !idx.passesMembersOnlyFilter(m) {
 			continue
 		}
 		if typeFilter != "" && m.Type != typeFilter {
@@ -187,6 +199,32 @@ func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string) []object.ObjectM
 
 	sortMetaDesc(result)
 	return result
+}
+
+// passesMembersOnlyFilter checks if an object passes the members_only filter.
+// Public objects always pass. For non-public objects in shared realms,
+// the signer must be a member of at least one of the object's shared realms.
+func (idx *Index) passesMembersOnlyFilter(m object.ObjectMeta) bool {
+	if m.IsPublic {
+		return true
+	}
+	if idx.shared == nil {
+		return true
+	}
+	// Check if any of the object's realms is a shared realm
+	hasSharedRealm := false
+	for _, r := range m.Realms {
+		if idx.shared.IsSharedRealm(r) {
+			hasSharedRealm = true
+			if idx.shared.IsMember(r, m.Pubkey) {
+				return true // signer is a member of this shared realm
+			}
+		}
+	}
+	if !hasSharedRealm {
+		return true // not in any shared realm, filter doesn't apply
+	}
+	return false // in shared realm(s) but signer is not a member of any
 }
 
 // GetMeta returns metadata for a single ref.

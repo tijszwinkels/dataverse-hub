@@ -12,6 +12,7 @@ import (
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
@@ -27,7 +28,7 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex()
+	index := storage.NewIndex(realm.NewSharedRealms())
 	limiter := auth.NewRateLimiter(1000, 100000)
 	authStore := auth.NewAuthStore(168 * time.Hour)
 
@@ -39,7 +40,7 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 	}
 	resolver := vhost.NewResolver(baseDomain, 5*time.Minute, dns)
 
-	hub := serving.NewHub(store, index, limiter, authStore, "")
+	hub := serving.NewHub(store, index, limiter, authStore, "", realm.NewSharedRealms())
 	hub.Vhost = resolver
 
 	ts := httptest.NewServer(hub.Router())

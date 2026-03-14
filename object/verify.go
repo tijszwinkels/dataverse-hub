@@ -35,11 +35,10 @@ func VerifyEnvelope(data []byte) error {
 		return fmt.Errorf("invalid item: %w", err)
 	}
 
-	// Check realm membership (supports both old and new format)
-	// Accept objects in dataverse001 or in a pubkey-realm
+	// Check that in field is present (supports both old and new format)
 	realms := ResolveIn(&env, &item)
-	if !realms.Contains("dataverse001") && len(PubkeyRealms(realms)) == 0 {
-		return errors.New("missing or wrong 'in' marker")
+	if len(realms) == 0 {
+		return errors.New("missing 'in' field")
 	}
 
 	if item.Pubkey == "" {

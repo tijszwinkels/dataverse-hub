@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/upstream"
@@ -18,7 +19,7 @@ import (
 )
 
 func main() {
-	cfg := loadConfig()
+	cfg, configPath := loadConfig()
 
 	store, err := storage.NewStore(cfg.StoreDir, cfg.BackupEnabled)
 	if err != nil {
@@ -28,7 +29,20 @@ func main() {
 		log.Printf("Revision backups enabled (bk/ directory)")
 	}
 
-	index := storage.NewIndex()
+	// Shared realms
+	shared := realm.NewSharedRealms()
+	if configPath != "" {
+		realms, err := loadRealmsFromFile(configPath)
+		if err != nil {
+			log.Fatalf("Failed to load shared realms: %v", err)
+		}
+		if realms != nil {
+			shared.Load(realms)
+			log.Printf("Shared realms: %d realms configured", shared.Count())
+		}
+	}
+
+	index := storage.NewIndex(shared)
 	count, dur, err := index.Rebuild(store)
 	if err != nil {
 		log.Fatalf("Failed to rebuild index: %v", err)
@@ -63,7 +77,7 @@ func main() {
 	switch cfg.Mode {
 	case "root":
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
-		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef)
+		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef, shared)
 		hub.Vhost = resolver
 		handler = hub.Router()
 
@@ -86,7 +100,7 @@ func main() {
 		pending.Start()
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
-		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending)
+		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending, shared)
 		proxy.Vhost = resolver
 		handler = proxy.Router()
 	}
@@ -98,6 +112,29 @@ func main() {
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
 	}
+
+	// SIGHUP: reload shared realm config
+	go func() {
+		sigHUP := make(chan os.Signal, 1)
+		signal.Notify(sigHUP, syscall.SIGHUP)
+		for range sigHUP {
+			log.Println("SIGHUP received, reloading shared realms...")
+			if configPath == "" {
+				log.Println("WARN: no config file provided, nothing to reload")
+				continue
+			}
+			realms, err := loadRealmsFromFile(configPath)
+			if err != nil {
+				log.Printf("ERROR: realm reload failed, keeping previous config: %v", err)
+				continue
+			}
+			if realms == nil {
+				realms = make(map[string][]string)
+			}
+			shared.Load(realms)
+			log.Printf("Reloaded shared realms: %d realms configured", shared.Count())
+		}
+	}()
 
 	// Graceful shutdown
 	done := make(chan struct{})
@@ -125,4 +162,3 @@ func main() {
 	<-done
 	log.Println("Server stopped")
 }
-

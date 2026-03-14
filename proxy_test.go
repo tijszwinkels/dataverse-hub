@@ -14,8 +14,9 @@ import (
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
-	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/upstream"
 )
 
@@ -27,23 +28,23 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 	// Root hub
 	rootDir := t.TempDir()
 	rootStore, _ := storage.NewStore(rootDir, true)
-	rootIndex := storage.NewIndex()
+	rootIndex := storage.NewIndex(realm.NewSharedRealms())
 	rootLimiter := auth.NewRateLimiter(10000, 1000000)
 	rootAuth := auth.NewAuthStore(168 * time.Hour)
-	rootHub := serving.NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "")
+	rootHub := serving.NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "", realm.NewSharedRealms())
 	rootSrv := httptest.NewServer(rootHub.Router())
 
 	// Proxy
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	up := upstream.NewClient(rootSrv.URL)
 	pendingDir := filepath.Join(proxyDir, "sync_pending")
 	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
 
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 
 	return proxySrv, rootSrv, func() {
@@ -199,7 +200,7 @@ func TestProxyPutUpstreamDown(t *testing.T) {
 func TestProxyPutSyncPendingCreated(t *testing.T) {
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -210,7 +211,7 @@ func TestProxyPutSyncPendingCreated(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -388,7 +389,7 @@ func TestProxyGet502FallsBackToCache(t *testing.T) {
 
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -398,7 +399,7 @@ func TestProxyGet502FallsBackToCache(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -432,7 +433,7 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -442,7 +443,7 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -485,7 +486,7 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -495,7 +496,7 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -542,7 +543,7 @@ func TestProxyGet404NotFoundBothSides(t *testing.T) {
 
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -552,7 +553,7 @@ func TestProxyGet404NotFoundBothSides(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
@@ -568,7 +569,7 @@ func TestProxyGet404NotFoundBothSides(t *testing.T) {
 func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 	proxyDir := t.TempDir()
 	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyIndex := storage.NewIndex()
+	proxyIndex := storage.NewIndex(realm.NewSharedRealms())
 	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
 	defer proxyLimiter.Stop()
 
@@ -592,7 +593,7 @@ func TestProxyCacheLocallySkipsOlderRevision(t *testing.T) {
 
 	proxyAuth := auth.NewAuthStore(168 * time.Hour)
 	defer proxyAuth.Stop()
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending)
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, realm.NewSharedRealms())
 
 	// Load fixture and store as rev 28 (the fixture's actual revision)
 	data := loadTestFixture(t, "root.json")

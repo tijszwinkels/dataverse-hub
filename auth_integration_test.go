@@ -17,8 +17,9 @@ import (
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
-	"github.com/tijszwinkels/dataverse-hub/storage"
+	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
+	"github.com/tijszwinkels/dataverse-hub/storage"
 )
 
 // signedObject creates a properly signed dataverse001 envelope for testing.
@@ -83,10 +84,10 @@ func testHubWithAuth(t *testing.T) (*httptest.Server, *auth.AuthStore, func()) {
 		t.Fatal(err)
 	}
 
-	index := storage.NewIndex()
+	index := storage.NewIndex(realm.NewSharedRealms())
 	limiter := auth.NewRateLimiter(1000, 100000)
 	auth := auth.NewAuthStore(168 * time.Hour)
-	hub := serving.NewHub(store, index, limiter, auth, "")
+	hub := serving.NewHub(store, index, limiter, auth, "", realm.NewSharedRealms())
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, auth, func() {

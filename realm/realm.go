@@ -19,3 +19,23 @@ func HasMatchingRealm(realms []string, authPubkey string) bool {
 	}
 	return false
 }
+
+// CanRead checks if the given pubkey can read an object with these realms.
+// Public objects are always readable. Private objects require matching
+// pubkey-realm or shared-realm membership.
+func CanRead(realms []string, authPubkey string, shared *SharedRealms) bool {
+	if IsPublicObject(realms) {
+		return true
+	}
+	if HasMatchingRealm(realms, authPubkey) {
+		return true
+	}
+	if authPubkey != "" && shared != nil {
+		for _, r := range realms {
+			if shared.IsMember(r, authPubkey) {
+				return true
+			}
+		}
+	}
+	return false
+}

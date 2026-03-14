@@ -130,7 +130,7 @@ func TestVerifyAcceptsBothInFormats(t *testing.T) {
 		err := VerifyEnvelope(legacy)
 		if err == nil {
 			t.Log("legacy format passed (signature happens to match)")
-		} else if err.Error() == "missing or wrong 'in' marker" {
+		} else if err.Error() == "missing 'in' field" {
 			t.Errorf("legacy 'in' on envelope should be accepted, got: %v", err)
 		}
 		// Other errors (signature failure) are expected since we changed item
@@ -150,7 +150,7 @@ func TestVerifyAcceptsBothInFormats(t *testing.T) {
 
 		legacy, _ := json.Marshal(raw)
 		err := VerifyEnvelope(legacy)
-		if err != nil && err.Error() == "missing or wrong 'in' marker" {
+		if err != nil && err.Error() == "missing 'in' field" {
 			t.Errorf("legacy 'in' array on envelope should be accepted, got: %v", err)
 		}
 	})

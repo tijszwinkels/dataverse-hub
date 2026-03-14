@@ -66,7 +66,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 // handleRootLegacy is the original root handler: redirect to ROOT object.
 func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
-	metas := h.index.GetAll("", "ROOT", "")
+	metas := h.index.GetAll("", "ROOT", "", false)
 	if len(metas) == 0 {
 		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
@@ -100,7 +100,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// Private object access control: return 404 (not 403) to avoid leaking existence
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
-		if !realm.HasMatchingRealm(meta.Realms, authPK) {
+		if !realm.CanRead(meta.Realms, authPK, h.shared) {
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -235,18 +235,22 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Object must belong to dataverse001 or a self-owned pubkey-realm
+	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
 	if !realms.Contains("dataverse001") {
-		hasSelfRealm := false
-		for _, realm := range realms {
-			if object.IsPubkeyRealm(realm) && realm == item.Pubkey {
-				hasSelfRealm = true
+		hasValidRealm := false
+		for _, r := range realms {
+			if object.IsPubkeyRealm(r) && r == item.Pubkey {
+				hasValidRealm = true
+				break
+			}
+			if h.shared != nil && h.shared.IsSharedRealm(r) {
+				hasValidRealm = true
 				break
 			}
 		}
-		if !hasSelfRealm {
+		if !hasValidRealm {
 			writeError(w, http.StatusBadRequest,
-				"object must belong to dataverse001 or a self-owned pubkey-realm",
+				"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
 				"INVALID_OBJECT")
 			return
 		}
@@ -330,9 +334,10 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
+	membersOnly := q.Get("members_only") != "false" // default true
 
 	authPK := auth.AuthPubkey(r)
-	metas := h.index.GetAll(pubkey, typeFilter, authPK)
+	metas := h.index.GetAll(pubkey, typeFilter, authPK, membersOnly)
 	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
 
 	if includeInboundCounts {
@@ -355,9 +360,10 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
 	includeInboundCounts := q.Get("include") == "inbound_counts"
+	membersOnly := q.Get("members_only") != "false"
 
 	authPK := auth.AuthPubkey(r)
-	metas := h.index.GetInbound(ref, filters, authPK)
+	metas := h.index.GetInbound(ref, filters, authPK, membersOnly)
 	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
 
 	if includeInboundCounts {
