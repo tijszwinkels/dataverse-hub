@@ -64,7 +64,8 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 | `default_viewer_ref` | *(built-in)* | PAGE ref used as default HTML viewer |
 | `backup_enabled` | `true` | Keep old revisions in `bk/` |
 | `auth_token_expiry` | `"168h"` | Bearer token / session cookie lifetime |
-| `base_domain` | `"localhost"` | Base domain for virtual hosting (set to `""` to disable) |
+| `base_domain` | `"localhost"` | Base domain for virtual hosting; required for `vhost_mode = "redirect"` or `"isolate"` |
+| `vhost_mode` | `"isolate"` | Host routing mode: `"off"`, `"redirect"`, or `"isolate"` |
 | `txt_cache_ttl` | `"5m"` | DNS TXT record cache TTL for custom domain resolution |
 
 ### Environment variables
@@ -83,6 +84,7 @@ Env vars override any value from the config file:
 | `HUB_BACKUP_ENABLED` | `backup_enabled` |
 | `HUB_AUTH_TOKEN_EXPIRY` | `auth_token_expiry` |
 | `HUB_BASE_DOMAIN` | `base_domain` |
+| `HUB_VHOST_MODE` | `vhost_mode` |
 | `HUB_TXT_CACHE_TTL` | `txt_cache_ttl` |
 
 ## API
@@ -158,13 +160,19 @@ Objects with the owner's pubkey as a realm in `item.in` are private — only acc
 GET /ask?domain={hostname}    # returns 200/403 for Caddy on-demand TLS decisions
 ```
 
-Approves certificates for hash subdomains (`{hash}.{base_domain}`) and custom domains with a valid `_dv.{domain}` TXT record pointing to a PAGE ref.
+Approves certificates for hash subdomains (`{hash}.{base_domain}`) and custom domains with a valid `_dv.{domain}` TXT record pointing to a PAGE ref. This works in both `redirect` and `isolate` mode.
 
 ## Virtual hosting
 
-Virtual hosting is enabled by default (`base_domain = "localhost"`). For production, set it to your domain. To disable, set `base_domain = ""`.
+Virtual hosting uses `base_domain` plus `vhost_mode`:
 
-The hub resolves PAGE objects from the `Host` header for origin isolation:
+- `vhost_mode = "off"` — disable host-based routing and on-demand TLS approval
+- `vhost_mode = "redirect"` — resolve `_dv.{host}` and known PAGE hosts, but redirect browser HTML requests to `https://{base_domain}/{ref}` on the shared origin
+- `vhost_mode = "isolate"` — resolve `_dv.{host}` and canonicalize PAGE HTML onto per-page origins
+
+If `base_domain = ""`, virtual hosting is effectively disabled regardless of `vhost_mode`.
+
+The hub resolves PAGE objects from the `Host` header:
 
 - **Hash subdomains** — `{sha256prefix}.{base_domain}` maps to a PAGE ref deterministically
 - **Named subdomains** — `social.{base_domain}` resolved via `_dv.social.{base_domain}` TXT record
@@ -189,7 +197,9 @@ Virtual hosting gives each PAGE its own origin (subdomain or custom domain). The
 - **Hash subdomains** (`{hash}.dataverse001.net`) — every PAGE gets a unique, deterministic subdomain automatically.
 - **Custom domains** — PAGE authors can point their own domain at the hub for friendlier URLs, with the same isolation.
 
-**Without virtual hosting** (`base_domain = ""`), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages.
+**With `vhost_mode = "redirect"`**, pretty domains still work as entrypoints, but browsers are redirected back to the shared base-domain path. That keeps friendly URLs functional without per-page origin isolation.
+
+**Without virtual hosting** (`base_domain = ""` or `vhost_mode = "off"`), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages.
 
 ### Identity per site
 

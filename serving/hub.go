@@ -4,11 +4,11 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Hub ties together the store, index, rate limiter, and auth.
@@ -19,11 +19,19 @@ type Hub struct {
 	auth             *auth.AuthStore
 	defaultViewerRef string
 	Vhost            *vhost.Resolver // nil = vhosting disabled
+	VhostMode        string
 }
 
 // NewHub creates a Hub with the given components.
 func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimiter, auth *auth.AuthStore, defaultViewerRef string) *Hub {
-	return &Hub{store: store, index: index, limiter: limiter, auth: auth, defaultViewerRef: defaultViewerRef}
+	return &Hub{
+		store:            store,
+		index:            index,
+		limiter:          limiter,
+		auth:             auth,
+		defaultViewerRef: defaultViewerRef,
+		VhostMode:        VhostModeIsolate,
+	}
 }
 
 // Router returns the chi router with all routes and middleware.

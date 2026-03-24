@@ -2,9 +2,15 @@ package main
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -17,8 +23,8 @@ import (
 	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
-// testHubWithVhost creates a Hub with vhosting enabled on baseDomain.
-func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]string) (*httptest.Server, *serving.Hub, func()) {
+// testHubWithVhostMode creates a Hub with vhosting enabled on baseDomain.
+func testHubWithVhostMode(t *testing.T, baseDomain, mode string, dnsRecords map[string][]string) (*httptest.Server, *serving.Hub, func()) {
 	t.Helper()
 
 	dir := t.TempDir()
@@ -41,6 +47,7 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 
 	hub := serving.NewHub(store, index, limiter, authStore, "")
 	hub.Vhost = resolver
+	hub.VhostMode = mode
 
 	ts := httptest.NewServer(hub.Router())
 	return ts, hub, func() {
@@ -48,6 +55,12 @@ func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]s
 		limiter.Stop()
 		authStore.Stop()
 	}
+}
+
+// testHubWithVhost creates a Hub with isolate-mode vhosting enabled on baseDomain.
+func testHubWithVhost(t *testing.T, baseDomain string, dnsRecords map[string][]string) (*httptest.Server, *serving.Hub, func()) {
+	t.Helper()
+	return testHubWithVhostMode(t, baseDomain, serving.VhostModeIsolate, dnsRecords)
 }
 
 func doGetWithHost(t *testing.T, ts *httptest.Server, path, host, accept string) *http.Response {
@@ -66,6 +79,123 @@ func doGetWithHost(t *testing.T, ts *httptest.Server, path, host, accept string)
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func doGetWithHostAndCookie(t *testing.T, ts *httptest.Server, path, host, accept string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	req.Host = host
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func privatePageObject(t *testing.T, priv *ecdsa.PrivateKey, pubkey, id string) []byte {
+	t.Helper()
+
+	item := map[string]any{
+		"in":         []string{pubkey},
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-18T12:00:00Z",
+		"updated_at": "2026-03-18T12:00:00Z",
+		"revision":   1,
+		"type":       "PAGE",
+		"content": map[string]string{
+			"html": "<!DOCTYPE html><html><body><h1>Private Page</h1></body></html>",
+		},
+	}
+	itemJSON, err := object.CanonicalJSON(mustMarshal(t, item))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hash := sha256.Sum256(itemJSON)
+	r, s, err := ecdsa.Sign(rand.Reader, priv, hash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(struct{ R, S *big.Int }{r, s})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]any{
+		"is":        "instructionGraph001",
+		"signature": base64.StdEncoding.EncodeToString(der),
+		"item":      json.RawMessage(itemJSON),
+	}
+	result, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func authenticateHost(t *testing.T, ts *httptest.Server, host string, priv *ecdsa.PrivateKey, pubkey string) *http.Cookie {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/auth/challenge", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("challenge expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	var challengeResp struct {
+		Challenge string `json:"challenge"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&challengeResp); err != nil {
+		t.Fatal(err)
+	}
+
+	body := bytes.NewBuffer(mustMarshal(t, map[string]string{
+		"pubkey":    pubkey,
+		"challenge": challengeResp.Challenge,
+		"signature": signChallenge(t, priv, challengeResp.Challenge),
+	}))
+	req, err = http.NewRequest(http.MethodPost, ts.URL+"/auth/token", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Host = host
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		t.Fatalf("token expected 200, got %d: %s", resp.StatusCode, respBody)
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name == "dv_session" {
+			return cookie
+		}
+	}
+	t.Fatal("expected dv_session cookie")
+	return nil
 }
 
 func TestVhost_BareDomain_LegacyBehavior(t *testing.T) {
@@ -300,6 +430,64 @@ func TestVhost_UnknownSubdomain_RootReturns404(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestVhost_UnknownSubdomain_WithRootObject_StillReturns404(t *testing.T) {
+	ts, _, cleanup := testHubWithVhost(t, "example.com", nil)
+	defer cleanup()
+
+	putFixture(t, ts, "root.json")
+
+	resp := doGetWithHost(t, ts, "/", "unknown.example.com", "text/html")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("unknown subdomain / with root object: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+}
+
+func TestVhostRedirectMode_TXTSubdomain_RedirectsToBaseDomainPath(t *testing.T) {
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	ts, _, cleanup := testHubWithVhostMode(t, "example.com", serving.VhostModeRedirect, map[string][]string{
+		"_dv.social.example.com": {"dv1-page=" + pageRef},
+	})
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+
+	resp := doGetWithHost(t, ts, "/", "social.example.com", "text/html")
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("redirect mode TXT subdomain /: expected 302, got %d: %s", resp.StatusCode, body)
+	}
+	loc := resp.Header.Get("Location")
+	expectedLoc := fmt.Sprintf("http://example.com/%s", pageRef)
+	if loc != expectedLoc {
+		t.Errorf("redirect Location = %q, want %q", loc, expectedLoc)
+	}
+	resp.Body.Close()
+}
+
+func TestVhostRedirectMode_PageRedirect_WrongHostUsesBaseDomain(t *testing.T) {
+	pageRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+	ts, hub, cleanup := testHubWithVhostMode(t, "example.com", serving.VhostModeRedirect, nil)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	hub.Vhost.AddPage(pageRef)
+
+	resp := doGetWithHost(t, ts, "/"+pageRef, "social.example.com", "text/html")
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("redirect mode page on pretty host: expected 302, got %d: %s", resp.StatusCode, body)
+	}
+	loc := resp.Header.Get("Location")
+	expectedLoc := fmt.Sprintf("http://example.com/%s", pageRef)
+	if loc != expectedLoc {
+		t.Errorf("redirect Location = %q, want %q", loc, expectedLoc)
+	}
+	resp.Body.Close()
+}
+
 func TestVhost_APIWorksOnAnySubdomain(t *testing.T) {
 	ts, _, cleanup := testHubWithVhost(t, "example.com", nil)
 	defer cleanup()
@@ -331,5 +519,71 @@ func TestVhost_PutUpdatesHashMap(t *testing.T) {
 	resolved := hub.Vhost.Resolve(hash + ".example.com")
 	if resolved != pageRef {
 		t.Errorf("after PUT, resolver should map hash to page ref, got %q", resolved)
+	}
+}
+
+func TestVhost_PrivatePageOnCanonicalHost_ShowsLoginWhenUnauthenticated(t *testing.T) {
+	priv, pubkey := testKeypair(t)
+	pageID := "bbbbbbbb-1111-4222-8333-cccccccccccc"
+	pageRef := pubkey + "." + pageID
+
+	ts, hub, cleanup := testHubWithVhost(t, "example.com", nil)
+	defer cleanup()
+
+	resp := doPut(t, ts, pageRef, privatePageObject(t, priv, pubkey, pageID))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT private page: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	hub.Vhost.AddPage(pageRef)
+
+	host := vhost.PageHash(pageRef) + ".example.com"
+	resp = doGetWithHost(t, ts, "/"+pageRef, host, "text/html")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("private page unauthenticated: expected 200 login page, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("Sign In To View This Page")) {
+		t.Fatalf("expected login page, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("Private Page")) {
+		t.Fatalf("unauthenticated request should not serve private page HTML: %s", body)
+	}
+}
+
+func TestVhost_PrivatePageOnCanonicalHost_AfterAuthServesPage(t *testing.T) {
+	priv, pubkey := testKeypair(t)
+	pageID := "dddddddd-1111-4222-8333-eeeeeeeeeeee"
+	pageRef := pubkey + "." + pageID
+
+	ts, hub, cleanup := testHubWithVhost(t, "example.com", nil)
+	defer cleanup()
+
+	resp := doPut(t, ts, pageRef, privatePageObject(t, priv, pubkey, pageID))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT private page: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	hub.Vhost.AddPage(pageRef)
+
+	host := vhost.PageHash(pageRef) + ".example.com"
+	cookie := authenticateHost(t, ts, host, priv, pubkey)
+
+	resp = doGetWithHostAndCookie(t, ts, "/"+pageRef, host, "text/html", cookie)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("private page with auth: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("Private Page")) {
+		t.Fatalf("expected private page HTML, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("Sign In To View This Page")) {
+		t.Fatalf("authenticated request should not serve login page: %s", body)
 	}
 }

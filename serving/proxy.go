@@ -10,14 +10,14 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/upstream"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
 )
 
 // Proxy is a caching proxy that forwards requests to an upstream root hub
@@ -29,6 +29,7 @@ type Proxy struct {
 	auth             *auth.AuthStore
 	defaultViewerRef string
 	Vhost            *vhost.Resolver // nil = vhosting disabled
+	VhostMode        string
 
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
@@ -42,6 +43,7 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 		limiter:          limiter,
 		auth:             auth,
 		defaultViewerRef: defaultViewerRef,
+		VhostMode:        VhostModeIsolate,
 		upstream:         up,
 		pending:          pending,
 	}
@@ -91,9 +93,26 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 	resolved := p.Vhost.Resolve(r.Host)
 	switch {
 	case resolved == "":
-		p.handleRootLegacy(w, r)
+		if baseHostMatches(r.Host, p.Vhost.BaseDomain()) {
+			p.handleRootLegacy(w, r)
+			return
+		}
+		writeError(w, http.StatusNotFound, "unknown host", "NOT_FOUND")
+		return
 
 	default:
+		if normalizeVhostMode(p.VhostMode) == VhostModeRedirect {
+			http.Redirect(w, r, pageRedirectTarget(p.VhostMode, p.Vhost, r, resolved, resolved), http.StatusFound)
+			return
+		}
+		if meta, found := p.index.GetMeta(resolved); found && !meta.IsPublic {
+			authPK := auth.AuthPubkey(r)
+			if !realm.HasMatchingRealm(meta.Realms, authPK) {
+				servePrivatePageLogin(w)
+				return
+			}
+		}
+
 		// ETag/304 check via index (no disk I/O)
 		if meta, found := p.index.GetMeta(resolved); found {
 			etag := `"` + strconv.Itoa(meta.Revision) + `-html"`
@@ -415,10 +434,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	limit := parseLimit(q.Get("limit"), 50, 200)
 	cursor := parseCursor(q.Get("cursor"))
 
-	items, refs, nextCursor, hasMore := paginateAndLoad(p.store,metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(p.store, metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = enrichWithInboundCounts(p.index,items, refs)
+		items = enrichWithInboundCounts(p.index, items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
@@ -537,7 +556,7 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 	}
 
 	if includeInboundCounts {
-		items = enrichWithInboundCounts(p.index,items, refs)
+		items = enrichWithInboundCounts(p.index, items, refs)
 	}
 
 	// Generate cursor from last merged item
@@ -582,7 +601,6 @@ func extractSortKey(raw json.RawMessage) (time.Time, string) {
 
 	return ts, ref
 }
-
 
 // cacheLocally stores an object in the local store and updates the index.
 // Refuses to downgrade: if local has a newer revision, pushes local to upstream instead.
@@ -727,6 +745,22 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
 		if !realm.HasMatchingRealm(meta.Realms, authPK) {
+			if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
+				pageRef := ref
+				if meta.HasPageRelation && meta.PageRef != "" {
+					pageRef = meta.PageRef
+				}
+				if !canonicalPageHost(p.VhostMode, p.Vhost, r.Host, pageRef) {
+					target := pageRedirectTarget(p.VhostMode, p.Vhost, r, ref, pageRef)
+					if r.URL.RawQuery != "" {
+						target += "?" + r.URL.RawQuery
+					}
+					http.Redirect(w, r, target, http.StatusFound)
+					return
+				}
+				servePrivatePageLogin(w)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -760,11 +794,8 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		if meta.HasPageRelation && meta.PageRef != "" {
 			pageRef = meta.PageRef
 		}
-		if !p.Vhost.IsPageHost(r.Host, pageRef) {
-			hash := vhost.PageHash(pageRef)
-			scheme := requestScheme(r)
-			port := requestPort(r)
-			target := fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, p.Vhost.BaseDomain(), port, ref)
+		if !canonicalPageHost(p.VhostMode, p.Vhost, r.Host, pageRef) {
+			target := pageRedirectTarget(p.VhostMode, p.Vhost, r, ref, pageRef)
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
@@ -1018,7 +1049,6 @@ func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
 	}
 	p.CacheLocally(ref, body)
 }
-
 
 // cacheUpstreamListRefs parses a list response from upstream and triggers
 // background ensureFresh calls for items not yet in the local cache.

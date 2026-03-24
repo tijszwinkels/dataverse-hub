@@ -28,8 +28,14 @@
 # auth_token_expiry = "168h"
 
 # Base domain for virtual hosting (default: "localhost")
-# Set to your domain in production. Set to "" to disable.
+# Required for vhost_mode = "redirect" or "isolate".
 # base_domain = "dataverse001.net"
+
+# Virtual hosting mode:
+# - "off": disable host-based routing and on-demand TLS approval
+# - "redirect": resolve _dv.* hosts, but redirect browsers to the shared base-domain path
+# - "isolate": give each PAGE its own canonical host/origin
+# vhost_mode = "isolate"
 
 # DNS TXT record cache TTL for custom domain resolution
 # txt_cache_ttl = "5m"
