@@ -39,3 +39,13 @@
 
 # DNS TXT record cache TTL for custom domain resolution
 # txt_cache_ttl = "5m"
+
+# Shared realms — grant a group of pubkeys shared read access to objects.
+# Realm names conventionally use "{owner-pubkey}.{Name}" but any string works.
+# Edit and send SIGHUP to reload without restart.
+#
+# [realms."AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.MyTeam"]
+# members = [
+#   "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ",
+#   "BzxY7_other_pubkey_here",
+# ]

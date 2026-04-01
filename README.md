@@ -67,6 +67,7 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 | `base_domain` | `"localhost"` | Base domain for virtual hosting; required for `vhost_mode = "redirect"` or `"isolate"` |
 | `vhost_mode` | `"isolate"` | Host routing mode: `"off"`, `"redirect"`, or `"isolate"` |
 | `txt_cache_ttl` | `"5m"` | DNS TXT record cache TTL for custom domain resolution |
+| `[realms."name"]` | *(none)* | Shared realm config — see [Shared realms](#shared-realms) below |
 
 ### Environment variables
 
@@ -147,6 +148,44 @@ Objects with the owner's pubkey as a realm in `item.in` are private — only acc
 ```json
 { "item": { "in": ["AxyU5_..."], "type": "DRAFT", ... } }
 ```
+
+### Shared realms
+
+Shared realms let a group of pubkeys share private access to objects. They sit between public (`dataverse001`) and identity-realms:
+
+- **Public** — anyone can read
+- **Shared realm** — only authenticated members can read
+- **Identity-realm** — only the owner can read
+
+Configure shared realms in `hub.toml`:
+
+```toml
+[realms."AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.MyTeam"]
+members = [
+  "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ",
+  "BzxY7_other_pubkey_here",
+]
+```
+
+Realm names follow the convention `{owner-pubkey}.{Name}` to show who created the realm, but any string works.
+
+**Behavior:**
+
+- Objects with a shared realm in `item.in` are only readable by authenticated members.
+- Unauthenticated requests return `404` (same as identity-realms).
+- Any signed object can be PUT into a shared realm — the `members_only` search filter (default: `true`) controls whether non-member contributions appear in list results.
+- Objects can belong to both a shared realm and `dataverse001` — the public realm takes precedence for read access.
+
+**Hot reload:** Edit `hub.toml` and send `SIGHUP` to the hub process — realm config reloads without restart. On parse error, the previous config is kept.
+
+**API:**
+
+```
+GET /auth/realms    # list shared realms the authenticated user belongs to (401 if unauthenticated)
+```
+
+Query parameter for search/inbound endpoints:
+- `members_only=false` — include objects signed by non-members (default: `true`)
 
 ### Content negotiation
 
