@@ -10,12 +10,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/tijszwinkels/dataverse-hub/auth"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
-	"github.com/go-chi/chi/v5"
 )
 
 const maxBodySize = 10 << 20 // 10 MB
@@ -31,10 +31,26 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 	resolved := h.Vhost.Resolve(r.Host)
 	switch {
 	case resolved == "":
-		// Bare domain or unknown host — existing behavior
-		h.handleRootLegacy(w, r)
+		if baseHostMatches(r.Host, h.Vhost.BaseDomain()) {
+			h.handleRootLegacy(w, r)
+			return
+		}
+		writeError(w, http.StatusNotFound, "unknown host", "NOT_FOUND")
+		return
 
 	default:
+		if normalizeVhostMode(h.VhostMode) == VhostModeRedirect {
+			http.Redirect(w, r, pageRedirectTarget(h.VhostMode, h.Vhost, r, resolved, resolved), http.StatusFound)
+			return
+		}
+		if meta, found := h.index.GetMeta(resolved); found && !meta.IsPublic {
+			authPK := auth.AuthPubkey(r)
+			if !realm.HasMatchingRealm(meta.Realms, authPK) {
+				servePrivatePageLogin(w)
+				return
+			}
+		}
+
 		// ETag/304 check via index (no disk I/O)
 		if meta, found := h.index.GetMeta(resolved); found {
 			etag := `"` + strconv.Itoa(meta.Revision) + `-html"`
@@ -101,6 +117,22 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
 		if !realm.CanRead(meta.Realms, authPK, h.shared) {
+			if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
+				pageRef := ref
+				if meta.HasPageRelation && meta.PageRef != "" {
+					pageRef = meta.PageRef
+				}
+				if !canonicalPageHost(h.VhostMode, h.Vhost, r.Host, pageRef) {
+					target := pageRedirectTarget(h.VhostMode, h.Vhost, r, ref, pageRef)
+					if r.URL.RawQuery != "" {
+						target += "?" + r.URL.RawQuery
+					}
+					http.Redirect(w, r, target, http.StatusFound)
+					return
+				}
+				servePrivatePageLogin(w)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -137,11 +169,8 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		if meta.HasPageRelation && meta.PageRef != "" {
 			pageRef = meta.PageRef
 		}
-		if !h.Vhost.IsPageHost(r.Host, pageRef) {
-			hash := vhost.PageHash(pageRef)
-			scheme := requestScheme(r)
-			port := requestPort(r)
-			target := fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, h.Vhost.BaseDomain(), port, ref)
+		if !canonicalPageHost(h.VhostMode, h.Vhost, r.Host, pageRef) {
+			target := pageRedirectTarget(h.VhostMode, h.Vhost, r, ref, pageRef)
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
@@ -325,10 +354,10 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 
 	authPK := auth.AuthPubkey(r)
 	metas := h.index.GetAll(pubkey, typeFilter, authPK, membersOnly)
-	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(h.store, metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = enrichWithInboundCounts(h.index,items, refs)
+		items = enrichWithInboundCounts(h.index, items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
@@ -351,15 +380,14 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 
 	authPK := auth.AuthPubkey(r)
 	metas := h.index.GetInbound(ref, filters, authPK, membersOnly)
-	items, refs, nextCursor, hasMore := paginateAndLoad(h.store,metas, cursor, limit)
+	items, refs, nextCursor, hasMore := paginateAndLoad(h.store, metas, cursor, limit)
 
 	if includeInboundCounts {
-		items = enrichWithInboundCounts(h.index,items, refs)
+		items = enrichWithInboundCounts(h.index, items, refs)
 	}
 
 	writeList(w, items, nextCursor, hasMore)
 }
-
 
 // acceptsHTML returns true if the request Accept header includes text/html.
 func acceptsHTML(r *http.Request) bool {

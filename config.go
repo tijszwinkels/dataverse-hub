@@ -24,24 +24,26 @@ type Config struct {
 
 	AuthTokenExpiry time.Duration // bearer token lifetime (default: 168h = 7 days)
 
-	BaseDomain  string        // e.g. "dataverse001.net", empty = vhosting disabled
+	BaseDomain  string        // e.g. "dataverse001.net", required for "redirect" and "isolate"
+	VhostMode   string        // "off", "redirect", or "isolate"
 	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
 }
 
 // fileConfig mirrors Config but with pointer fields so we can distinguish
 // "not set in TOML" from "set to zero value".
 type fileConfig struct {
-	Mode             *string  `toml:"mode"`
-	UpstreamURL      *string  `toml:"upstream_url"`
-	Addr             *string  `toml:"addr"`
-	StoreDir         *string  `toml:"store_dir"`
-	RateLimitPerMin  *int     `toml:"rate_limit_per_min"`
-	RateLimitPerDay  *int     `toml:"rate_limit_per_day"`
-	DefaultViewerRef *string  `toml:"default_viewer_ref"`
-	BackupEnabled    *bool    `toml:"backup_enabled"`
-	AuthTokenExpiry *string `toml:"auth_token_expiry"`
-	BaseDomain       *string  `toml:"base_domain"`
-	TxtCacheTTL      *string  `toml:"txt_cache_ttl"`
+	Mode             *string `toml:"mode"`
+	UpstreamURL      *string `toml:"upstream_url"`
+	Addr             *string `toml:"addr"`
+	StoreDir         *string `toml:"store_dir"`
+	RateLimitPerMin  *int    `toml:"rate_limit_per_min"`
+	RateLimitPerDay  *int    `toml:"rate_limit_per_day"`
+	DefaultViewerRef *string `toml:"default_viewer_ref"`
+	BackupEnabled    *bool   `toml:"backup_enabled"`
+	AuthTokenExpiry  *string `toml:"auth_token_expiry"`
+	BaseDomain       *string `toml:"base_domain"`
+	VhostMode        *string `toml:"vhost_mode"`
+	TxtCacheTTL      *string `toml:"txt_cache_ttl"`
 
 	Realms map[string]realmConfig `toml:"realms"`
 }
@@ -69,6 +71,7 @@ func loadConfig() (Config, string) {
 		BackupEnabled:    true,
 		AuthTokenExpiry:  168 * time.Hour, // 7 days
 		BaseDomain:       "localhost",
+		VhostMode:        "isolate",
 		TxtCacheTTL:      5 * time.Minute,
 	}
 
@@ -146,6 +149,9 @@ func applyFile(cfg *Config, path string) error {
 	if fc.BaseDomain != nil {
 		cfg.BaseDomain = *fc.BaseDomain
 	}
+	if fc.VhostMode != nil {
+		cfg.VhostMode = *fc.VhostMode
+	}
 	if fc.TxtCacheTTL != nil {
 		if d, err := time.ParseDuration(*fc.TxtCacheTTL); err == nil {
 			cfg.TxtCacheTTL = d
@@ -200,6 +206,9 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv("HUB_BASE_DOMAIN"); v != "" {
 		cfg.BaseDomain = v
 	}
+	if v := os.Getenv("HUB_VHOST_MODE"); v != "" {
+		cfg.VhostMode = v
+	}
 	if v := os.Getenv("HUB_TXT_CACHE_TTL"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			cfg.TxtCacheTTL = d
@@ -207,5 +216,14 @@ func applyEnv(cfg *Config) {
 			log.Printf("WARN: invalid HUB_TXT_CACHE_TTL=%q, keeping %v", v, cfg.TxtCacheTTL)
 		}
 	}
-}
 
+	switch cfg.VhostMode {
+	case "", "isolate", "redirect", "off":
+		if cfg.VhostMode == "" {
+			cfg.VhostMode = "isolate"
+		}
+	default:
+		log.Printf("WARN: invalid HUB_VHOST_MODE=%q, keeping %q", cfg.VhostMode, "isolate")
+		cfg.VhostMode = "isolate"
+	}
+}

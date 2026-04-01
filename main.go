@@ -51,7 +51,7 @@ func main() {
 
 	// Build vhost resolver if BaseDomain is configured
 	var resolver *vhost.Resolver
-	if cfg.BaseDomain != "" {
+	if cfg.BaseDomain != "" && cfg.VhostMode != serving.VhostModeOff {
 		resolver = vhost.NewResolver(cfg.BaseDomain, cfg.TxtCacheTTL, nil)
 
 		// Build hash map from indexed PAGE objects
@@ -61,7 +61,11 @@ func main() {
 			pageHashes[vhost.PageHash(ref)] = ref
 		}
 		resolver.UpdateHashMap(pageHashes)
-		log.Printf("Vhost enabled: base_domain=%s, %d PAGEs mapped", cfg.BaseDomain, len(pageHashes))
+		log.Printf("Vhost enabled: mode=%s, base_domain=%s, %d PAGEs mapped", cfg.VhostMode, cfg.BaseDomain, len(pageHashes))
+	} else if cfg.VhostMode != serving.VhostModeOff {
+		log.Printf("Vhost disabled: base_domain is empty (vhost_mode=%s)", cfg.VhostMode)
+	} else {
+		log.Printf("Vhost disabled: vhost_mode=off")
 	}
 
 	limiter := auth.NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
@@ -79,6 +83,7 @@ func main() {
 		log.Printf("Starting dataverse hub (root mode) on %s (store: %s)", cfg.Addr, cfg.StoreDir)
 		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef, shared)
 		hub.Vhost = resolver
+		hub.VhostMode = cfg.VhostMode
 		handler = hub.Router()
 
 	default: // "proxy" is the default
@@ -102,6 +107,7 @@ func main() {
 
 		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending, shared)
 		proxy.Vhost = resolver
+		proxy.VhostMode = cfg.VhostMode
 		handler = proxy.Router()
 	}
 
