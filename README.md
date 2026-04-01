@@ -57,6 +57,7 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 |---|---|---|
 | `mode` | `"proxy"` | `"root"` or `"proxy"` |
 | `upstream_url` | `"https://dataverse001.net"` | Upstream hub (proxy mode) |
+| `upstream_push` | `"public"` | What to forward upstream: `"public"` (only dataverse001) or `"all"` (all realms) |
 | `addr` | `":5678"` | Listen address |
 | `store_dir` | `"./dataverse001"` | Object store directory |
 | `rate_limit_per_min` | `120` | Requests per minute per IP |
@@ -77,6 +78,7 @@ Env vars override any value from the config file:
 |---|---|
 | `DATAVERSE_MODE` | `mode` |
 | `DATAVERSE_UPSTREAM_URL` | `upstream_url` |
+| `DATAVERSE_UPSTREAM_PUSH` | `upstream_push` |
 | `HUB_ADDR` | `addr` |
 | `HUB_STORE_DIR` | `store_dir` |
 | `HUB_RATE_LIMIT_PER_MIN` | `rate_limit_per_min` |

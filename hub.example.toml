@@ -8,6 +8,11 @@
 # Upstream hub URL (proxy mode only)
 # upstream_url = "https://dataverse001.net"
 
+# What to forward upstream in proxy mode:
+# "public" (default) — only dataverse001 objects
+# "all" — all objects, including identity-realm and shared-realm
+# upstream_push = "public"
+
 # Listen address
 # addr = ":5678"
 

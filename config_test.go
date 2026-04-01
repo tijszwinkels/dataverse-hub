@@ -159,3 +159,41 @@ func TestApplyFileMissing(t *testing.T) {
 		t.Error("expected error for missing file, got nil")
 	}
 }
+
+func TestUpstreamPushFromFile(t *testing.T) {
+	tomlContent := `
+upstream_push = "all"
+`
+	path := filepath.Join(t.TempDir(), "hub.toml")
+	if err := os.WriteFile(path, []byte(tomlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{UpstreamPush: "public"}
+	if err := applyFile(&cfg, path); err != nil {
+		t.Fatalf("applyFile: %v", err)
+	}
+
+	if cfg.UpstreamPush != "all" {
+		t.Errorf("UpstreamPush = %q, want %q", cfg.UpstreamPush, "all")
+	}
+}
+
+func TestUpstreamPushFromEnv(t *testing.T) {
+	cfg := Config{UpstreamPush: "public"}
+	t.Setenv("DATAVERSE_UPSTREAM_PUSH", "all")
+	applyEnv(&cfg)
+
+	if cfg.UpstreamPush != "all" {
+		t.Errorf("UpstreamPush = %q, want %q (env override)", cfg.UpstreamPush, "all")
+	}
+}
+
+func TestUpstreamPushInvalidFallsBackToPublic(t *testing.T) {
+	cfg := Config{UpstreamPush: "bogus"}
+	applyEnv(&cfg)
+
+	if cfg.UpstreamPush != "public" {
+		t.Errorf("UpstreamPush = %q, want %q (fallback from invalid)", cfg.UpstreamPush, "public")
+	}
+}

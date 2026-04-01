@@ -697,6 +697,173 @@ func TestProxyListCachesItemsInBackground(t *testing.T) {
 	}
 }
 
+// --- upstream_push = "all" tests ---
+
+// TestProxyPutPrivateObjectForwardedWhenUpstreamPushAll verifies that when
+// UpstreamPush is "all", private objects (identity-realm) are forwarded to
+// upstream instead of stored locally only.
+func TestProxyPutPrivateObjectForwardedWhenUpstreamPushAll(t *testing.T) {
+	// Track what upstream receives
+	var putReceived atomic.Bool
+	var putRef string
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			putReceived.Store(true)
+			putRef = r.URL.Path[1:] // strip leading /
+			body, _ := io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+			w.Write(body)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(object.APIError{Error: "not found", Code: "NOT_FOUND"})
+	}))
+	defer fakeUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient(fakeUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxy.UpstreamPush = "all" // <-- the new flag
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	// Create a private object (identity-realm only)
+	priv, pubkey := testKeypair(t)
+	id := "aaaa1111-1111-4111-8111-111111111111"
+	ref := pubkey + "." + id
+	data := signedObject(t, priv, pubkey, id, []string{pubkey}, "NOTE")
+
+	resp := doPut(t, proxySrv, ref, data)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Should get 201 (forwarded to upstream, not 202 pending)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT private with upstream_push=all: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+
+	// Upstream should have received the PUT
+	if !putReceived.Load() {
+		t.Fatal("expected private object to be forwarded to upstream when upstream_push=all")
+	}
+	if putRef != ref {
+		t.Errorf("upstream received ref %q, want %q", putRef, ref)
+	}
+}
+
+// TestProxyPutPrivateObjectLocalOnlyByDefault verifies that with default config,
+// private objects are NOT forwarded to upstream (existing behavior preserved).
+func TestProxyPutPrivateObjectLocalOnlyByDefault(t *testing.T) {
+	var putReceived atomic.Bool
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			putReceived.Store(true)
+			body, _ := io.ReadAll(r.Body)
+			w.WriteHeader(http.StatusCreated)
+			w.Write(body)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(object.APIError{Error: "not found", Code: "NOT_FOUND"})
+	}))
+	defer fakeUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient(fakeUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	// UpstreamPush defaults to "" which means "public" only
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	priv, pubkey := testKeypair(t)
+	id := "bbbb2222-2222-4222-8222-222222222222"
+	ref := pubkey + "." + id
+	data := signedObject(t, priv, pubkey, id, []string{pubkey}, "NOTE")
+
+	resp := doPut(t, proxySrv, ref, data)
+	resp.Body.Close()
+
+	// Should get 201 (stored locally)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT private with default config: expected 201, got %d", resp.StatusCode)
+	}
+
+	// Upstream should NOT have received the PUT
+	time.Sleep(50 * time.Millisecond)
+	if putReceived.Load() {
+		t.Fatal("private object should NOT be forwarded to upstream with default upstream_push")
+	}
+}
+
+// TestProxyPutUpstreamPushAllPendingSyncOnFailure verifies that when
+// upstream_push=all and upstream is down, private objects go to sync_pending.
+func TestProxyPutUpstreamPushAllPendingSyncOnFailure(t *testing.T) {
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient("http://127.0.0.1:1") // will fail immediately
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxy.UpstreamPush = "all"
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	priv, pubkey := testKeypair(t)
+	id := "cccc3333-3333-4333-8333-333333333333"
+	ref := pubkey + "." + id
+	data := signedObject(t, priv, pubkey, id, []string{pubkey}, "NOTE")
+
+	resp := doPut(t, proxySrv, ref, data)
+	resp.Body.Close()
+
+	// Should get 202 (stored locally, sync pending)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("PUT private with upstream down: expected 202, got %d", resp.StatusCode)
+	}
+
+	// Check sync_pending has the file
+	entries, _ := os.ReadDir(pendingDir)
+	found := false
+	for _, e := range entries {
+		if e.Name() == ref+".json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected private object in sync_pending/ when upstream_push=all and upstream down")
+	}
+}
+
 // forgeRevision patches the revision in a JSON envelope (for testing only).
 func forgeRevision(t *testing.T, data []byte, rev int) []byte {
 	t.Helper()

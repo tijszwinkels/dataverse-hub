@@ -32,6 +32,11 @@ type Proxy struct {
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 	VhostMode        string
 
+	// UpstreamPush controls which objects are forwarded to upstream on PUT.
+	// "public" (default) — only dataverse001 objects are forwarded.
+	// "all" — all objects are forwarded, including identity-realm and shared-realm.
+	UpstreamPush string
+
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
 }
@@ -288,8 +293,8 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Private objects (no dataverse001) are stored locally only — never forwarded to upstream
-	if !realm.IsPublicObject(realms) {
+	// Private objects are stored locally only — unless upstream_push = "all"
+	if !realm.IsPublicObject(realms) && p.UpstreamPush != "all" {
 		p.storePrivateLocally(w, ref, item, canonical, realms)
 		return
 	}

@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Mode             string // "root" or "proxy" (default: "proxy")
 	UpstreamURL      string // upstream hub URL, only used in proxy mode
+	UpstreamPush     string // "public" (default) or "all" — controls what gets forwarded upstream
 	Addr             string
 	StoreDir         string
 	RateLimitPerMin  int
@@ -34,6 +35,7 @@ type Config struct {
 type fileConfig struct {
 	Mode             *string `toml:"mode"`
 	UpstreamURL      *string `toml:"upstream_url"`
+	UpstreamPush     *string `toml:"upstream_push"`
 	Addr             *string `toml:"addr"`
 	StoreDir         *string `toml:"store_dir"`
 	RateLimitPerMin  *int    `toml:"rate_limit_per_min"`
@@ -63,6 +65,7 @@ func loadConfig() (Config, string) {
 	cfg := Config{
 		Mode:             "proxy",
 		UpstreamURL:      "https://dataverse001.net",
+		UpstreamPush:     "public",
 		Addr:             ":5678",
 		StoreDir:         "./dataverse001",
 		RateLimitPerMin:  120,
@@ -121,6 +124,9 @@ func applyFile(cfg *Config, path string) error {
 	if fc.UpstreamURL != nil {
 		cfg.UpstreamURL = *fc.UpstreamURL
 	}
+	if fc.UpstreamPush != nil {
+		cfg.UpstreamPush = *fc.UpstreamPush
+	}
 	if fc.Addr != nil {
 		cfg.Addr = *fc.Addr
 	}
@@ -169,6 +175,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv("DATAVERSE_UPSTREAM_URL"); v != "" {
 		cfg.UpstreamURL = v
+	}
+	if v := os.Getenv("DATAVERSE_UPSTREAM_PUSH"); v != "" {
+		cfg.UpstreamPush = v
 	}
 	if v := os.Getenv("HUB_ADDR"); v != "" {
 		cfg.Addr = v
@@ -225,5 +234,15 @@ func applyEnv(cfg *Config) {
 	default:
 		log.Printf("WARN: invalid HUB_VHOST_MODE=%q, keeping %q", cfg.VhostMode, "isolate")
 		cfg.VhostMode = "isolate"
+	}
+
+	switch cfg.UpstreamPush {
+	case "", "public":
+		cfg.UpstreamPush = "public"
+	case "all":
+		// valid
+	default:
+		log.Printf("WARN: invalid upstream_push=%q, using %q", cfg.UpstreamPush, "public")
+		cfg.UpstreamPush = "public"
 	}
 }

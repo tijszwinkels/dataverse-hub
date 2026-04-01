@@ -87,7 +87,7 @@ func main() {
 		handler = hub.Router()
 
 	default: // "proxy" is the default
-		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir)
+		log.Printf("Starting dataverse hub (proxy mode) on %s -> %s (store: %s, upstream_push: %s)", cfg.Addr, cfg.UpstreamURL, cfg.StoreDir, cfg.UpstreamPush)
 		up := upstream.NewClient(cfg.UpstreamURL)
 
 		// Probe upstream before serving
@@ -106,6 +106,7 @@ func main() {
 		proxyCleanup = append(proxyCleanup, pending.Stop)
 
 		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending, shared)
+		proxy.UpstreamPush = cfg.UpstreamPush
 		proxy.Vhost = resolver
 		proxy.VhostMode = cfg.VhostMode
 		handler = proxy.Router()
