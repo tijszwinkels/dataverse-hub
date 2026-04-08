@@ -399,15 +399,10 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	// Background-cache upstream items we don't have locally yet
 	go p.cacheUpstreamListRefs(body)
 
-	// If user is not authenticated, forward upstream response as-is (fast path)
 	authPK := auth.AuthPubkey(r)
-	if authPK == "" {
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
-		return
-	}
 
-	// User is authenticated — merge local private objects into upstream results
+	// Merge local-only objects (server-public, private) into upstream results.
+	// Even unauthenticated users may see server-public objects that only exist locally.
 	var upstreamResp object.ListResponse
 	if err := json.Unmarshal(body, &upstreamResp); err != nil {
 		// Can't parse upstream response — forward raw
@@ -417,7 +412,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 		return
 	}
 
-	p.mergePrivateIntoUpstream(w, r, upstreamResp, authPK)
+	p.mergeLocalIntoUpstream(w, r, upstreamResp, authPK)
 }
 
 // serveLocalList serves list/inbound results from the local index (fallback).
@@ -456,10 +451,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items, nextCursor, hasMore)
 }
 
-// mergePrivateIntoUpstream merges local private objects into an upstream list response.
+// mergeLocalIntoUpstream merges local-only objects (server-public, private) into an upstream list response.
 // Private objects never exist on upstream, so no dedup is needed. Both sources are sorted
 // by (UpdatedAt DESC, Ref), enabling a standard merge-sort.
-func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp object.ListResponse, authPK string) {
+func (p *Proxy) mergeLocalIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp object.ListResponse, authPK string) {
 	q := r.URL.Query()
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
