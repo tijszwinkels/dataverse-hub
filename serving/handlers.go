@@ -267,7 +267,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, h.shared) {
 		writeError(w, http.StatusBadRequest,
-			"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
 	}

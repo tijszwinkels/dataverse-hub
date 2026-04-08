@@ -268,7 +268,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.shared) {
 		writeError(w, http.StatusBadRequest,
-			"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
 	}
@@ -293,8 +293,8 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Private objects are stored locally only — unless upstream_push = "all"
-	if !realm.IsPublicObject(realms) && p.UpstreamPush != "all" {
+	// Non-global objects (private, server-public) are stored locally only — unless upstream_push = "all"
+	if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
 		p.storePrivateLocally(w, ref, item, canonical, realms)
 		return
 	}
