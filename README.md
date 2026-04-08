@@ -155,7 +155,8 @@ Objects with the owner's pubkey as a realm in `item.in` are private — only acc
 
 Shared realms let a group of pubkeys share private access to objects. They sit between public (`dataverse001`) and identity-realms:
 
-- **Public** — anyone can read
+- **Public (`dataverse001`)** — anyone can read, propagated globally
+- **Server-public** — anyone can read, stays on this hub
 - **Shared realm** — only authenticated members can read
 - **Identity-realm** — only the owner can read
 
@@ -188,6 +189,26 @@ GET /auth/realms    # list shared realms the authenticated user belongs to (401 
 
 Query parameter for search/inbound endpoints:
 - `members_only=false` — include objects signed by non-members (default: `true`)
+
+### Server-public realm
+
+The well-known realm `"server-public"` is readable by anyone without authentication (like `dataverse001`) but stays on the hub — it is not propagated upstream by default.
+
+```json
+{ "item": { "in": ["server-public"], "type": "POST", ... } }
+```
+
+Use this for data that should be publicly accessible on your hub but not spread globally (e.g. corporate/business applications).
+
+### Realm access and propagation summary
+
+| Realm | Auth to read | `upstream_push=public` | `upstream_push=all` |
+|-------|-------------|----------------------|-------------------|
+| `dataverse001` | No | Pushed upstream | Pushed upstream |
+| `server-public` | No | **Stays local** | Pushed upstream |
+| Shared realm | Members only | Stays local | Pushed upstream |
+| Identity realm (pubkey) | Owner only | Stays local | Pushed upstream |
+| `local` (ig CLI only) | N/A | Never pushed | Never pushed |
 
 ### Content negotiation
 

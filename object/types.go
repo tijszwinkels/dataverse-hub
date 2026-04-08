@@ -102,7 +102,7 @@ type ObjectMeta struct {
 	HasPageRelation bool     // true if item has a "page" relation
 	PageRef         string   // first page relation ref (for ETag computation)
 	MimeType        string   // content.mime_type for BLOB objects (used for content negotiation)
-	IsPublic        bool     // true if "dataverse001" in realms
+	IsPublic        bool     // true if publicly readable without auth ("dataverse001" or "server-public")
 	Realms          []string // all realm strings from in field
 	UpdatedAt       time.Time
 }

@@ -150,6 +150,8 @@ func TestValidateRealmsForPut(t *testing.T) {
 		{"empty realms", []string{}, pk, shared, false},
 		{"nil shared config", []string{pk + ".acme-team"}, pk, nil, false},
 		{"nil shared dataverse001", []string{"dataverse001"}, pk, nil, true},
+		{"server-public", []string{"server-public"}, pk, shared, true},
+		{"server-public nil shared", []string{"server-public"}, pk, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -196,6 +198,8 @@ func TestCanRead(t *testing.T) {
 		// nil shared config
 		{"nil shared no effect", []string{"pk.acme-team"}, "alice", nil, false},
 		{"nil shared public still works", []string{"dataverse001"}, "", nil, true},
+		{"server-public no auth", []string{"server-public"}, "", shared, true},
+		{"server-public with auth", []string{"server-public"}, "alice", shared, true},
 		{"nil shared owner still works", []string{"alice"}, "alice", nil, true},
 	}
 	for _, tt := range tests {

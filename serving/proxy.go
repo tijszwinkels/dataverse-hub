@@ -115,7 +115,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		if meta, found := p.index.GetMeta(resolved); found && !meta.IsPublic {
 			authPK := auth.AuthPubkey(r)
-			if !realm.HasMatchingRealm(meta.Realms, authPK) {
+			if !realm.CanRead(meta.Realms, authPK, p.shared) {
 				servePrivatePageLogin(w)
 				return
 			}
@@ -268,7 +268,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.shared) {
 		writeError(w, http.StatusBadRequest,
-			"object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm",
+			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
 	}
@@ -293,8 +293,8 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Private objects are stored locally only — unless upstream_push = "all"
-	if !realm.IsPublicObject(realms) && p.UpstreamPush != "all" {
+	// Non-global objects (private, server-public) are stored locally only — unless upstream_push = "all"
+	if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
 		p.storePrivateLocally(w, ref, item, canonical, realms)
 		return
 	}
@@ -399,15 +399,10 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	// Background-cache upstream items we don't have locally yet
 	go p.cacheUpstreamListRefs(body)
 
-	// If user is not authenticated, forward upstream response as-is (fast path)
 	authPK := auth.AuthPubkey(r)
-	if authPK == "" {
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
-		return
-	}
 
-	// User is authenticated — merge local private objects into upstream results
+	// Merge local-only objects (server-public, private) into upstream results.
+	// Even unauthenticated users may see server-public objects that only exist locally.
 	var upstreamResp object.ListResponse
 	if err := json.Unmarshal(body, &upstreamResp); err != nil {
 		// Can't parse upstream response — forward raw
@@ -417,7 +412,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 		return
 	}
 
-	p.mergePrivateIntoUpstream(w, r, upstreamResp, authPK)
+	p.mergeLocalIntoUpstream(w, r, upstreamResp, authPK)
 }
 
 // serveLocalList serves list/inbound results from the local index (fallback).
@@ -456,10 +451,10 @@ func (p *Proxy) serveLocalList(w http.ResponseWriter, r *http.Request) {
 	writeList(w, items, nextCursor, hasMore)
 }
 
-// mergePrivateIntoUpstream merges local private objects into an upstream list response.
+// mergeLocalIntoUpstream merges local-only objects (server-public, private) into an upstream list response.
 // Private objects never exist on upstream, so no dedup is needed. Both sources are sorted
 // by (UpdatedAt DESC, Ref), enabling a standard merge-sort.
-func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp object.ListResponse, authPK string) {
+func (p *Proxy) mergeLocalIntoUpstream(w http.ResponseWriter, r *http.Request, upstreamResp object.ListResponse, authPK string) {
 	q := r.URL.Query()
 	ref := chi.URLParam(r, "ref")
 	includeInboundCounts := q.Get("include") == "inbound_counts"
@@ -480,10 +475,12 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK, membersOnly)
 	}
 
-	// Filter to private-only objects (upstream already has public ones)
+	// Filter to objects not already on upstream.
+	// Private objects and server-public objects are local-only;
+	// only global (dataverse001) objects exist on upstream.
 	privateMetas := make([]object.ObjectMeta, 0, len(metas))
 	for _, m := range metas {
-		if !m.IsPublic {
+		if !realm.IsGlobalObject(m.Realms) {
 			privateMetas = append(privateMetas, m)
 		}
 	}
@@ -1012,7 +1009,18 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 
 // pushToUpstream PUTs a local object to upstream (fire-and-forget).
 // Used when we discover upstream is missing an object we have locally.
+// Only global objects (dataverse001) are pushed; server-public and private objects stay local.
 func (p *Proxy) pushToUpstream(ref string, data []byte) {
+	// Guard: only push global objects upstream
+	env, item, err := object.ParseEnvelope(data)
+	if err == nil {
+		realms := object.ResolveIn(env, item)
+		if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
+			log.Printf("[proxy] skip push %s: not a global object", ref)
+			return
+		}
+	}
+
 	req, err := http.NewRequest(http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] WARN: push %s: build request: %v", ref, err)

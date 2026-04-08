@@ -24,6 +24,44 @@ import (
 	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
+// testHubWithVhostModeAndShared creates a Hub with vhosting and shared realms.
+func testHubWithVhostModeAndShared(t *testing.T, baseDomain, mode string, dnsRecords map[string][]string, sharedConfig map[string][]string) (*httptest.Server, *serving.Hub, func()) {
+	t.Helper()
+
+	dir := t.TempDir()
+	store, err := storage.NewStore(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	shared := realm.NewSharedRealms()
+	if sharedConfig != nil {
+		shared.Load(sharedConfig)
+	}
+	index := storage.NewIndex(shared)
+	limiter := auth.NewRateLimiter(1000, 100000)
+	authStore := auth.NewAuthStore(168 * time.Hour)
+
+	dns := func(host string) ([]string, error) {
+		if r, ok := dnsRecords[host]; ok {
+			return r, nil
+		}
+		return nil, fmt.Errorf("no such host")
+	}
+	resolver := vhost.NewResolver(baseDomain, 5*time.Minute, dns)
+
+	hub := serving.NewHub(store, index, limiter, authStore, "", shared)
+	hub.Vhost = resolver
+	hub.VhostMode = mode
+
+	ts := httptest.NewServer(hub.Router())
+	return ts, hub, func() {
+		ts.Close()
+		limiter.Stop()
+		authStore.Stop()
+	}
+}
+
 // testHubWithVhostMode creates a Hub with vhosting enabled on baseDomain.
 func testHubWithVhostMode(t *testing.T, baseDomain, mode string, dnsRecords map[string][]string) (*httptest.Server, *serving.Hub, func()) {
 	t.Helper()
@@ -101,6 +139,48 @@ func doGetWithHostAndCookie(t *testing.T, ts *httptest.Server, path, host, accep
 		t.Fatal(err)
 	}
 	return resp
+}
+
+func sharedRealmPageObject(t *testing.T, priv *ecdsa.PrivateKey, pubkey, id, realmName string) []byte {
+	t.Helper()
+
+	item := map[string]any{
+		"in":         []string{realmName},
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-18T12:00:00Z",
+		"updated_at": "2026-03-18T12:00:00Z",
+		"revision":   1,
+		"type":       "PAGE",
+		"content": map[string]string{
+			"html": "<!DOCTYPE html><html><body><h1>Shared Realm Page</h1></body></html>",
+		},
+	}
+	itemJSON, err := object.CanonicalJSON(mustMarshal(t, item))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hash := sha256.Sum256(itemJSON)
+	r, s, err := ecdsa.Sign(rand.Reader, priv, hash[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(struct{ R, S *big.Int }{r, s})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	env := map[string]any{
+		"is":        "instructionGraph001",
+		"signature": base64.StdEncoding.EncodeToString(der),
+		"item":      json.RawMessage(itemJSON),
+	}
+	result, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func privatePageObject(t *testing.T, priv *ecdsa.PrivateKey, pubkey, id string) []byte {
@@ -587,5 +667,63 @@ func TestVhost_PrivatePageOnCanonicalHost_AfterAuthServesPage(t *testing.T) {
 	}
 	if bytes.Contains(body, []byte("Sign In To View This Page")) {
 		t.Fatalf("authenticated request should not serve login page: %s", body)
+	}
+}
+
+func TestVhost_SharedRealmPage_VhostRoot_AuthenticatedMemberServesPage(t *testing.T) {
+	// Owner creates a PAGE in a shared realm; a different member authenticates
+	// and should be able to access it via vhost root.
+	ownerPriv, ownerPubkey := testKeypair(t)
+	memberPriv, memberPubkey := testKeypair(t)
+
+	realmName := ownerPubkey + ".TeamRealm"
+	pageID := "eeeeeeee-2222-4333-9444-ffffffffffff"
+	pageRef := ownerPubkey + "." + pageID
+
+	ts, hub, cleanup := testHubWithVhostModeAndShared(t, "example.com", serving.VhostModeIsolate, nil,
+		map[string][]string{
+			realmName: {ownerPubkey, memberPubkey},
+		})
+	defer cleanup()
+
+	// Owner PUTs a PAGE in the shared realm
+	resp := doPut(t, ts, pageRef, sharedRealmPageObject(t, ownerPriv, ownerPubkey, pageID, realmName))
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT shared realm page: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	hub.Vhost.AddPage(pageRef)
+
+	host := vhost.PageHash(pageRef) + ".example.com"
+
+	// Unauthenticated → should get login page
+	resp = doGetWithHost(t, ts, "/", host, "text/html")
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("shared realm page unauthenticated: expected 200 login page, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("Sign In To View This Page")) {
+		t.Fatalf("expected login page for unauthenticated request, got: %s", body)
+	}
+
+	// Member authenticates (not the owner, but a shared-realm member)
+	cookie := authenticateHost(t, ts, host, memberPriv, memberPubkey)
+
+	// Authenticated member → should get the actual page
+	resp = doGetWithHostAndCookie(t, ts, "/", host, "text/html", cookie)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("shared realm page with member auth: expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("Shared Realm Page")) {
+		t.Fatalf("expected shared realm page HTML, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("Sign In To View This Page")) {
+		t.Fatalf("authenticated member should not see login page: %s", body)
 	}
 }
