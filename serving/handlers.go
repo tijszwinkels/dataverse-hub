@@ -45,7 +45,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		if meta, found := h.index.GetMeta(resolved); found && !meta.IsPublic {
 			authPK := auth.AuthPubkey(r)
-			if !realm.HasMatchingRealm(meta.Realms, authPK) {
+			if !realm.CanRead(meta.Realms, authPK, h.shared) {
 				servePrivatePageLogin(w)
 				return
 			}
