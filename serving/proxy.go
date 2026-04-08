@@ -480,10 +480,12 @@ func (p *Proxy) mergePrivateIntoUpstream(w http.ResponseWriter, r *http.Request,
 		metas = p.index.GetAll(q.Get("by"), q.Get("type"), authPK, membersOnly)
 	}
 
-	// Filter to private-only objects (upstream already has public ones)
+	// Filter to objects not already on upstream.
+	// Private objects and server-public objects are local-only;
+	// only global (dataverse001) objects exist on upstream.
 	privateMetas := make([]object.ObjectMeta, 0, len(metas))
 	for _, m := range metas {
-		if !m.IsPublic {
+		if !realm.IsGlobalObject(m.Realms) {
 			privateMetas = append(privateMetas, m)
 		}
 	}
@@ -1012,7 +1014,18 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 
 // pushToUpstream PUTs a local object to upstream (fire-and-forget).
 // Used when we discover upstream is missing an object we have locally.
+// Only global objects (dataverse001) are pushed; server-public and private objects stay local.
 func (p *Proxy) pushToUpstream(ref string, data []byte) {
+	// Guard: only push global objects upstream
+	env, item, err := object.ParseEnvelope(data)
+	if err == nil {
+		realms := object.ResolveIn(env, item)
+		if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
+			log.Printf("[proxy] skip push %s: not a global object", ref)
+			return
+		}
+	}
+
 	req, err := http.NewRequest(http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] WARN: push %s: build request: %v", ref, err)
