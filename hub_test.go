@@ -1133,3 +1133,133 @@ func putAllFixtures(t *testing.T, ts *httptest.Server) {
 		resp.Body.Close()
 	}
 }
+
+// --- 404 page tests ---
+
+func TestNotFoundHTML_Unauthenticated(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	resp := doGetWithAccept(t, ts, "/nonexistent.00000000-0000-0000-0000-000000000000", "text/html")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct != "text/html; charset=utf-8" {
+		t.Fatalf("expected text/html content type, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("Object Not Found")) {
+		t.Fatal("expected 'Object Not Found' in HTML body")
+	}
+	// Unauthenticated → should include login form
+	if !bytes.Contains(body, []byte("Sign In")) {
+		t.Fatal("expected login form in unauthenticated 404 page")
+	}
+}
+
+func TestNotFoundJSON_APIRequest(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	// Default Go client (no Accept: text/html) → should get JSON
+	resp := doGet(t, ts, "/nonexistent.00000000-0000-0000-0000-000000000000")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	var apiErr object.APIError
+	if err := json.NewDecoder(resp.Body).Decode(&apiErr); err != nil {
+		t.Fatalf("expected JSON error body, got decode error: %v", err)
+	}
+	if apiErr.Code != "NOT_FOUND" {
+		t.Fatalf("expected NOT_FOUND code, got %q", apiErr.Code)
+	}
+}
+
+func TestNotFoundHTML_Authenticated(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	// Authenticate
+	priv, pubkey := testKeypair(t)
+	token := authenticateAs(t, ts, priv, pubkey)
+
+	// GET 404 with auth + Accept: text/html
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/nonexistent.00000000-0000-0000-0000-000000000000", nil)
+	req.Header.Set("Accept", "text/html")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("Object Not Found")) {
+		t.Fatal("expected 'Object Not Found' in HTML body")
+	}
+	// Authenticated → should show sign-out button and auth info
+	if !bytes.Contains(body, []byte("btn-signout")) {
+		t.Fatal("expected sign-out button in authenticated 404 page")
+	}
+	if !bytes.Contains(body, []byte("Signed in as")) {
+		t.Fatal("expected 'Signed in as' in authenticated 404 page")
+	}
+	// Should still have login form (to switch identities)
+	if !bytes.Contains(body, []byte("tab-pass")) {
+		t.Fatal("expected login form in authenticated 404 page for identity switching")
+	}
+}
+
+func TestLoginPageParam(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	// PUT a public object first
+	putFixture(t, ts, "root.json")
+
+	// GET with ?login=true should show login page instead of content
+	resp := doGetWithAccept(t, ts, "/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000?login=true", "text/html")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for ?login=true, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("Sign In")) {
+		t.Fatal("expected 'Sign In' heading in login page")
+	}
+	if !bytes.Contains(body, []byte("tab-pass")) {
+		t.Fatal("expected login form in ?login=true page")
+	}
+}
+
+func TestLoginPageParam_APIIgnored(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	// API client with ?login=true but no text/html → should get normal object
+	putFixture(t, ts, "root.json")
+
+	resp := doGet(t, ts, "/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-0000-0000-000000000000?login=true")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for API client, got %d", resp.StatusCode)
+	}
+	// Should be JSON, not HTML
+	var env struct{ Is string }
+	if err := json.NewDecoder(resp.Body).Decode(&env); err != nil {
+		t.Fatalf("expected JSON response, got decode error: %v", err)
+	}
+	if env.Is != "instructionGraph001" {
+		t.Fatalf("expected instructionGraph001 object, got %q", env.Is)
+	}
+}
