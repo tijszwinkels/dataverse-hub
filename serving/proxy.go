@@ -81,8 +81,6 @@ func (p *Proxy) Router() http.Handler {
 	r.Post("/auth/logout", p.auth.HandleLogout)
 	r.Get("/auth/realms", handleAuthRealms(p.shared))
 
-	r.Get("/logout", handleLogoutPage(p.auth))
-
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
@@ -164,12 +162,6 @@ func (p *Proxy) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 // handleGetObject proxies GET /{ref} through upstream with ETag enrichment.
 func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
-
-	// ?login=true — serve login page for any URL (browser only)
-	if r.URL.Query().Get("login") == "true" && acceptsHTML(r) {
-		serveLoginPage(w, r)
-		return
-	}
 
 	// Build upstream request — ETag reflects our cache state, not the client's
 	clientETag := r.Header.Get("If-None-Match")

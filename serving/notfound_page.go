@@ -15,13 +15,6 @@ func serve404Page(w http.ResponseWriter, r *http.Request) {
 		"The requested object could not be found. If this is a private object, it may become available after you sign in.")
 }
 
-// serveLoginPage serves a login page (triggered by ?login=true). Returns 200.
-func serveLoginPage(w http.ResponseWriter, r *http.Request) {
-	serveLoginHTML(w, r, http.StatusOK,
-		"Sign In",
-		"Sign in to access private objects on this hub.")
-}
-
 func serveLoginHTML(w http.ResponseWriter, r *http.Request, status int, heading, description string) {
 	pubkey := auth.AuthPubkey(r)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -590,11 +583,7 @@ function loadKeyFrom(name) {
 }
 
 function finish() {
-  // Strip ?login=true before reloading so the page shows content instead of login
-  var url = new URL(window.location.href);
-  url.searchParams.delete('login');
-  if (url.search === '') url.search = '';
-  window.location.replace(url.toString());
+  window.location.reload();
 }
 
 function saveAuthMeta(mode, username) {

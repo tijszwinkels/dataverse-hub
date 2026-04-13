@@ -55,8 +55,6 @@ func (h *Hub) Router() http.Handler {
 	r.Post("/auth/logout", h.auth.HandleLogout)
 	r.Get("/auth/realms", handleAuthRealms(h.shared))
 
-	r.Get("/logout", handleLogoutPage(h.auth))
-
 	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
