@@ -105,6 +105,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if data == nil {
+			if acceptsHTML(r) {
+				serve404Page(w, r)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -131,6 +135,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				servePrivatePageLogin(w)
+				return
+			}
+			if acceptsHTML(r) {
+				serve404Page(w, r)
 				return
 			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
@@ -196,6 +204,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data == nil {
+		if acceptsHTML(r) {
+			serve404Page(w, r)
+			return
+		}
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}

@@ -204,6 +204,10 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	case http.StatusNotFound:
 		localData, _ := p.store.Read(ref)
 		if localData == nil {
+			if acceptsHTML(r) {
+				serve404Page(w, r)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -745,6 +749,10 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	if !found {
 		data, err := p.store.Read(ref)
 		if err != nil || data == nil {
+			if acceptsHTML(r) {
+				serve404Page(w, r)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -770,6 +778,10 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 					return
 				}
 				servePrivatePageLogin(w)
+				return
+			}
+			if acceptsHTML(r) {
+				serve404Page(w, r)
 				return
 			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
@@ -825,6 +837,10 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 
 	data, err := p.store.Read(ref)
 	if err != nil || data == nil {
+		if acceptsHTML(r) {
+			serve404Page(w, r)
+			return
+		}
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
