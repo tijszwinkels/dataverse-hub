@@ -94,6 +94,12 @@ func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
+	// ?login=true — serve login page for any URL (browser only)
+	if r.URL.Query().Get("login") == "true" && acceptsHTML(r) {
+		serveLoginPage(w, r)
+		return
+	}
+
 	// Fast path: use index to build ETag and check 304 without disk I/O
 	meta, found := h.index.GetMeta(ref)
 	if !found {
@@ -105,6 +111,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if data == nil {
+			if acceptsHTML(r) {
+				serve404Page(w, r)
+				return
+			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
@@ -131,6 +141,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				servePrivatePageLogin(w)
+				return
+			}
+			if acceptsHTML(r) {
+				serve404Page(w, r)
 				return
 			}
 			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
@@ -196,6 +210,10 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if data == nil {
+		if acceptsHTML(r) {
+			serve404Page(w, r)
+			return
+		}
 		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
