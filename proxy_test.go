@@ -893,22 +893,25 @@ func TestProxyRefShapeGateBlocksScannerPaths(t *testing.T) {
 	proxySrv := httptest.NewServer(proxy.Router())
 	defer proxySrv.Close()
 
-	// Representative scanner paths captured from the converseai incident.
-	scannerPaths := []string{
+	// Single-segment scanner paths from the converseai incident. Each one
+	// matches chi's /{ref} route and is rejected by IsValidRef inside
+	// handleGetObject — not by chi's router. Multi-segment scanner paths
+	// (/api/v1/users, /.git/HEAD, /static/foo, …) are dropped by chi
+	// before reaching the handler at all and are covered separately below.
+	gateExercisingPaths := []string{
 		"/.env",
 		"/wp-config.php",
 		"/info.php",
 		"/robots.txt",
 		"/.git",
 		"/admin",
-		"/api/v1/users",
 		"/static.html",
 		"/some-random-key.not-a-uuid",
 		"/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.not-a-uuid",
 		"/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.346BEFZE-94ff-4f7a-bcf6-d78ae1e1541c", // non-hex Z
 	}
 
-	for _, path := range scannerPaths {
+	for _, path := range gateExercisingPaths {
 		resp := doGet(t, proxySrv, path)
 		if resp.StatusCode != http.StatusNotFound {
 			body, _ := io.ReadAll(resp.Body)
@@ -917,12 +920,29 @@ func TestProxyRefShapeGateBlocksScannerPaths(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	// Same paths under /{ref}/inbound.
-	for _, path := range scannerPaths {
+	// /{ref}/inbound variant — exercises the gate in handleInbound.
+	for _, path := range gateExercisingPaths {
 		resp := doGet(t, proxySrv, path+"/inbound")
 		if resp.StatusCode != http.StatusNotFound {
 			body, _ := io.ReadAll(resp.Body)
 			t.Errorf("GET %s/inbound: expected 404, got %d: %s", path, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+	}
+
+	// Multi-segment scanner paths are caught by chi routing before
+	// reaching the handler. They still must not forward to upstream.
+	chiRoutedPaths := []string{
+		"/api/v1/users",
+		"/.git/HEAD",
+		"/static/foo.js",
+		"/wp-admin/admin-ajax.php",
+	}
+	for _, path := range chiRoutedPaths {
+		resp := doGet(t, proxySrv, path)
+		if resp.StatusCode != http.StatusNotFound {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("GET %s: expected 404, got %d: %s", path, resp.StatusCode, body)
 		}
 		resp.Body.Close()
 	}
