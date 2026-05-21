@@ -864,6 +864,114 @@ func TestProxyPutUpstreamPushAllPendingSyncOnFailure(t *testing.T) {
 	}
 }
 
+// TestProxyRefShapeGateBlocksScannerPaths verifies that scanner traffic for
+// paths that cannot be valid dataverse refs (/.env, /wp-config.php, …) gets
+// 404'd at the proxy without any upstream call. This protects upstream's
+// per-IP rate limit from being exhausted by scanner traffic to the proxy.
+func TestProxyRefShapeGateBlocksScannerPaths(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer fakeUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient(fakeUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	// Representative scanner paths captured from the converseai incident.
+	scannerPaths := []string{
+		"/.env",
+		"/wp-config.php",
+		"/info.php",
+		"/robots.txt",
+		"/.git",
+		"/admin",
+		"/api/v1/users",
+		"/static.html",
+		"/some-random-key.not-a-uuid",
+		"/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.not-a-uuid",
+		"/AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.346BEFZE-94ff-4f7a-bcf6-d78ae1e1541c", // non-hex Z
+	}
+
+	for _, path := range scannerPaths {
+		resp := doGet(t, proxySrv, path)
+		if resp.StatusCode != http.StatusNotFound {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("GET %s: expected 404, got %d: %s", path, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+	}
+
+	// Same paths under /{ref}/inbound.
+	for _, path := range scannerPaths {
+		resp := doGet(t, proxySrv, path+"/inbound")
+		if resp.StatusCode != http.StatusNotFound {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("GET %s/inbound: expected 404, got %d: %s", path, resp.StatusCode, body)
+		}
+		resp.Body.Close()
+	}
+
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Errorf("expected zero upstream calls for scanner paths, got %d", got)
+	}
+}
+
+// TestProxyRefShapeGatePutBlocksGarbageRef verifies that PUT to a garbage URL
+// is 404'd before any signature verification or upstream call.
+func TestProxyRefShapeGatePutBlocksGarbageRef(t *testing.T) {
+	var upstreamCalls atomic.Int64
+	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer fakeUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient(fakeUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	// Real, well-signed object — but PUT to a garbage ref.
+	data := loadTestFixture(t, "root.json")
+	resp := doPut(t, proxySrv, "wp-config.php", data)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("PUT garbage ref: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	if got := upstreamCalls.Load(); got != 0 {
+		t.Errorf("expected zero upstream calls for garbage-ref PUT, got %d", got)
+	}
+}
+
 // forgeRevision patches the revision in a JSON envelope (for testing only).
 func forgeRevision(t *testing.T, data []byte, rev int) []byte {
 	t.Helper()

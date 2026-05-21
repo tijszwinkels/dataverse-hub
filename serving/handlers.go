@@ -94,6 +94,13 @@ func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
+	// Ref-shape gate: reject scanner traffic (/.env, /wp-config.php, …)
+	// without touching the index or the store. Cuts log spam.
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
+
 	// Fast path: use index to build ETag and check 304 without disk I/O
 	meta, found := h.index.GetMeta(ref)
 	if !found {
@@ -235,6 +242,12 @@ func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, da
 func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
+	// Ref-shape gate — short-circuits before ECDSA verification on garbage URLs.
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to read body", "INVALID_OBJECT")
@@ -366,6 +379,13 @@ func (h *Hub) handleListObjects(w http.ResponseWriter, r *http.Request) {
 // handleGetInbound serves GET /{ref}/inbound
 func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
+
+	// Ref-shape gate (see handleGetObject for rationale).
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
+
 	q := r.URL.Query()
 
 	filters := storage.InboundFilters{
