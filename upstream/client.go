@@ -152,10 +152,19 @@ func (u *Client) Stop() {
 }
 
 // IsDown returns true for HTTP status codes that indicate the upstream
-// server is down (502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout).
+// is effectively unavailable to us: 502 Bad Gateway, 503 Service Unavailable,
+// 504 Gateway Timeout, and 429 Too Many Requests.
+//
+// 429 is included because in proxy mode every forwarded request shares the
+// proxy's outbound IP, so scanner traffic at the proxy can exhaust upstream's
+// per-IP rate-limit and wedge legitimate reads. Treating 429 as "down"
+// lets the caller fall back to the local cache instead of relaying the
+// 429 to the client.
+//
 // These warrant a fallback to the local cache rather than forwarding to the client.
 func IsDown(statusCode int) bool {
 	return statusCode == http.StatusBadGateway ||
 		statusCode == http.StatusServiceUnavailable ||
-		statusCode == http.StatusGatewayTimeout
+		statusCode == http.StatusGatewayTimeout ||
+		statusCode == http.StatusTooManyRequests
 }
