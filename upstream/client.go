@@ -81,8 +81,17 @@ func (u *Client) Do(req *http.Request, bodyBytes []byte) (*http.Response, error)
 		return nil, fmt.Errorf("upstream unreachable: %w", err)
 	}
 
-	u.available.Store(true)
-	log.Printf("[proxy] upstream %s %s → %d", req.Method, req.URL.Path, resp.StatusCode)
+	// Down-status responses (5xx gateway errors, 429 rate-limited) mark the
+	// upstream unavailable so subsequent calls fast-fail and the health-checker
+	// drives recovery. Without this, every incoming request under sustained
+	// rate-limiting would still do a full round-trip to upstream.
+	if IsDown(resp.StatusCode) {
+		u.available.Store(false)
+		log.Printf("[proxy] upstream %s %s → %d (marked unavailable)", req.Method, req.URL.Path, resp.StatusCode)
+	} else {
+		u.available.Store(true)
+		log.Printf("[proxy] upstream %s %s → %d", req.Method, req.URL.Path, resp.StatusCode)
+	}
 	return resp, nil
 }
 
