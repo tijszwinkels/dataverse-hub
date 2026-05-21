@@ -163,6 +163,15 @@ func (p *Proxy) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 
+	// Ref-shape gate: refs that can't possibly be valid (scanner traffic for
+	// /.env, /wp-config.php, /robots.txt, …) get 404'd without an upstream
+	// call. This protects upstream's per-IP rate limit, since from upstream's
+	// perspective every proxy-forwarded request comes from a single IP.
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
+
 	// Build upstream request — ETag reflects our cache state, not the client's
 	clientETag := r.Header.Get("If-None-Match")
 	upstreamETag := p.buildUpstreamETag(ref)
@@ -236,6 +245,12 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 // handlePutObject proxies PUT /{ref} with local signature verification.
 func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
+
+	// Ref-shape gate — short-circuits before ECDSA verification on garbage URLs.
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
@@ -362,6 +377,11 @@ func (p *Proxy) handleSearch(w http.ResponseWriter, r *http.Request) {
 // handleInbound forwards GET /{ref}/inbound to upstream, falls back to local.
 func (p *Proxy) handleInbound(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
+	// Ref-shape gate (see handleGetObject for rationale).
+	if !object.IsValidRef(ref) {
+		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		return
+	}
 	p.forwardListEndpoint(w, r, "/"+ref+"/inbound?"+r.URL.RawQuery)
 }
 

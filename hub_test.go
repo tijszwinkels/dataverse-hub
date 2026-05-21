@@ -138,7 +138,10 @@ func TestPutRefMismatch(t *testing.T) {
 	defer cleanup()
 
 	data := loadTestFixture(t, "root.json")
-	resp := doPut(t, ts, "wrong.ref-value", data)
+	// URL ref has valid shape but points at a different object than the body.
+	// The ref-shape gate passes; the REF_MISMATCH check rejects with 400.
+	mismatchRef := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.11111111-1111-4111-8111-111111111111"
+	resp := doPut(t, ts, mismatchRef, data)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("wrong ref PUT expected 400, got %d", resp.StatusCode)
 	}
