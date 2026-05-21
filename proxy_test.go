@@ -972,6 +972,51 @@ func TestProxyRefShapeGatePutBlocksGarbageRef(t *testing.T) {
 	}
 }
 
+// TestProxyGet429FallsBackToCache verifies the IsDown(429) safety net:
+// when upstream returns 429 (rate-limited), proxy serves from local cache
+// instead of relaying the 429 to the client.
+func TestProxyGet429FallsBackToCache(t *testing.T) {
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer badUpstream.Close()
+
+	proxyDir := t.TempDir()
+	proxyStore, _ := storage.NewStore(proxyDir, true)
+	proxyShared := realm.NewSharedRealms()
+	proxyIndex := storage.NewIndex(proxyShared)
+	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
+	defer proxyLimiter.Stop()
+
+	up := upstream.NewClient(badUpstream.URL)
+	pendingDir := filepath.Join(proxyDir, "sync_pending")
+	pending := upstream.NewSyncPending(pendingDir, up, proxyStore, proxyIndex)
+
+	proxyAuth := auth.NewAuthStore(168 * time.Hour)
+	defer proxyAuth.Stop()
+	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
+	proxySrv := httptest.NewServer(proxy.Router())
+	defer proxySrv.Close()
+
+	// Pre-populate local cache
+	data := loadTestFixture(t, "root.json")
+	var env object.Envelope
+	json.Unmarshal(data, &env)
+	var item object.Item
+	json.Unmarshal(env.Item, &item)
+	ref := item.Ref()
+	ts, _ := item.Timestamp()
+	proxyStore.Write(ref, data, ts)
+	proxyIndex.Update(ref, &item, ts)
+
+	resp := doGet(t, proxySrv, "/"+ref)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 from cache fallback on upstream 429, got %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
 // forgeRevision patches the revision in a JSON envelope (for testing only).
 func forgeRevision(t *testing.T, data []byte, rev int) []byte {
 	t.Helper()

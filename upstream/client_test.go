@@ -215,10 +215,16 @@ func TestIsDown(t *testing.T) {
 	if !IsDown(http.StatusGatewayTimeout) {
 		t.Error("504 should be down")
 	}
+	if !IsDown(http.StatusTooManyRequests) {
+		t.Error("429 should be down (treated as upstream rate-limited)")
+	}
 	if IsDown(http.StatusOK) {
 		t.Error("200 should not be down")
 	}
 	if IsDown(http.StatusInternalServerError) {
 		t.Error("500 should not be down")
+	}
+	if IsDown(http.StatusNotFound) {
+		t.Error("404 should not be down")
 	}
 }
