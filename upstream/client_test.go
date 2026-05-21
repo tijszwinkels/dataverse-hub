@@ -94,6 +94,65 @@ func TestClientDoTransportErrorMarksUnavailable(t *testing.T) {
 	}
 }
 
+func TestClientDoDownStatusMarksUnavailable(t *testing.T) {
+	// Each "down" status code should flip availability to false so subsequent
+	// requests fast-fail and the health-checker drives recovery.
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{"502", http.StatusBadGateway},
+		{"503", http.StatusServiceUnavailable},
+		{"504", http.StatusGatewayTimeout},
+		{"429", http.StatusTooManyRequests},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			u := NewClient(srv.URL)
+			req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
+			resp, err := u.Do(req, nil)
+			if err != nil {
+				t.Fatalf("down status should not return err: %v", err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != tc.status {
+				t.Errorf("expected %d, got %d", tc.status, resp.StatusCode)
+			}
+			if u.Available() {
+				t.Errorf("upstream should be marked unavailable after %d", tc.status)
+			}
+		})
+	}
+}
+
+func TestClientDoNonDownErrorKeepsAvailable(t *testing.T) {
+	// Non-"down" HTTP errors (4xx other than 429, 5xx other than 502/503/504)
+	// should NOT flip availability — they're client-error responses, not
+	// upstream-down signals.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	u := NewClient(srv.URL)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/test", nil)
+	resp, err := u.Do(req, nil)
+	if err != nil {
+		t.Fatalf("400 should not return err: %v", err)
+	}
+	resp.Body.Close()
+
+	if !u.Available() {
+		t.Error("upstream should remain available after 400 (client error, not down)")
+	}
+}
+
 func TestClientDoPUTPreservesBody(t *testing.T) {
 	var lastBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
