@@ -1006,6 +1006,36 @@ func TestBlobWithPageRelationRawAndJSONUnchanged(t *testing.T) {
 	}
 }
 
+// When a BLOB's `page` relation points at a PAGE that is NOT in the local
+// store, there is no viewer to render, so it must fall back to raw bytes — and
+// the ETag must agree (an -blob ETag, never -html). Otherwise a browser caches
+// raw bytes under an -html ETag and the cache desyncs. The PAGE is deliberately
+// not stored here.
+func TestBlobWithPageRelationFallsBackToRawWhenPageMissing(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	ref, data := makeBlobWithPageRelation(t, pageFixtureRef) // page.json NOT stored
+	if resp := doPut(t, ts, ref, data); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT blob failed: %d", resp.StatusCode)
+	}
+
+	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+	resp := doGetWithAccept(t, ts, "/"+ref, browserAccept)
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Errorf("missing page: expected raw image/png fallback, got %q", ct)
+	}
+	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
+		t.Errorf("missing page: expected raw PNG bytes, got %d bytes", len(body))
+	}
+	// ETag must reflect the raw body, not claim HTML.
+	if etag := resp.Header.Get("ETag"); !strings.HasSuffix(etag, `-blob"`) {
+		t.Errorf("missing page: ETag must match the raw body (-blob), got %q", etag)
+	}
+}
+
 func TestBlobStrippedFromListResponse(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()

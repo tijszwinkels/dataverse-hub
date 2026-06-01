@@ -156,7 +156,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	isHTML := false
 	isBlob := false
 	switch {
-	case acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation):
+	case acceptsHTML(r) && pageViewable(h.index, meta):
 		isHTML = true
 	case meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType):
 		isBlob = true
@@ -217,7 +217,9 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 // clients, taking priority over raw BLOB serving — this is what lets a browser
 // open a BLOB and see its attached viewer instead of raw bytes. The generic
 // default viewer does NOT pre-empt a raw BLOB (it runs after serveBlob), so a
-// BLOB with no page relation still serves its raw bytes to browsers.
+// BLOB with no page relation still serves its raw bytes to browsers. Non-HTML
+// clients (curl's */*, application/json) never enter the acceptsHTML branches,
+// so they keep their raw-BLOB / JSON-envelope behavior unchanged.
 func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
 	if acceptsHTML(r) {
 		if html := h.resolvePageHTML(data); html != "" {
@@ -575,6 +577,23 @@ func (h *Hub) resolveDefaultViewerHTML() string {
 		return ""
 	}
 	return h.resolvePageHTML(data)
+}
+
+// pageViewable reports whether an HTML request for meta should render a
+// page-relation / inline-PAGE viewer. A PAGE always renders its inline HTML; a
+// page relation only renders when its target PAGE is present in the index (and
+// thus the store). Gating on availability keeps the ETag representation in step
+// with serveObject(Data): if the page can't be resolved, both fall back to the
+// raw BLOB, so the ETag must not claim HTML.
+func pageViewable(index *storage.Index, meta object.ObjectMeta) bool {
+	if meta.Type == "PAGE" {
+		return true
+	}
+	if meta.HasPageRelation && meta.PageRef != "" {
+		_, found := index.GetMeta(meta.PageRef)
+		return found
+	}
+	return false
 }
 
 // pageETagSuffix returns the ETag suffix for HTML representations.
