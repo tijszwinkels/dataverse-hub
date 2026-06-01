@@ -148,20 +148,20 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// Build ETag from indexed revision
 	etag := `"` + strconv.Itoa(meta.Revision) + `"`
 
-	// Determine representation from index data (no disk I/O)
+	// Determine representation from index data (no disk I/O). Precedence:
+	//   1. PAGE / page-relation viewer — for HTML-accepting clients only.
+	//   2. raw BLOB content negotiation — curl, */*, or a BLOB with no page relation.
+	//   3. generic default viewer — for HTML-accepting clients; never pre-empts a raw BLOB.
+	// This mirrors serveObject's body decision so the ETag matches what is served.
 	isHTML := false
-	if acceptsHTML(r) {
-		if meta.Type == "PAGE" || meta.HasPageRelation {
-			isHTML = true
-		} else if h.defaultViewerRef != "" && ref != h.defaultViewerRef {
-			isHTML = true
-		}
-	}
-	// BLOB content negotiation overrides the default viewer (but not PAGE/page-relation)
 	isBlob := false
-	if meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+	switch {
+	case acceptsHTML(r) && pageViewable(h.index, meta):
+		isHTML = true
+	case meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType):
 		isBlob = true
-		isHTML = false
+	case acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef:
+		isHTML = true
 	}
 
 	if isHTML {
@@ -212,24 +212,29 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 
 // serveObject writes the response body for a GET that isn't 304.
 // ETag/Vary headers must already be set by the caller.
-// BLOB content negotiation runs first — it only fires for type BLOB, so
-// PAGE objects and page-relation HTML are unaffected. This ensures BLOBs
-// take priority over the default viewer (which would otherwise intercept
-// browser requests that include text/html in Accept).
+//
+// A real page relation or inline PAGE renders the viewer for HTML-accepting
+// clients, taking priority over raw BLOB serving — this is what lets a browser
+// open a BLOB and see its attached viewer instead of raw bytes. The generic
+// default viewer does NOT pre-empt a raw BLOB (it runs after serveBlob), so a
+// BLOB with no page relation still serves its raw bytes to browsers. Non-HTML
+// clients (curl's */*, application/json) never enter the acceptsHTML branches,
+// so they keep their raw-BLOB / JSON-envelope behavior unchanged.
 func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
+	if acceptsHTML(r) {
+		if html := h.resolvePageHTML(data); html != "" {
+			writePageHTML(w, html, h.baseDomain())
+			return
+		}
+	}
+
 	if serveBlob(w, r, data) {
 		return
 	}
 
-	if acceptsHTML(r) {
-		html := h.resolvePageHTML(data)
-		if html == "" && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
-			html = h.resolveDefaultViewerHTML()
-		}
-		if html != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, injectBaseDomain(html, h.baseDomain()))
+	if acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
+		if html := h.resolveDefaultViewerHTML(); html != "" {
+			writePageHTML(w, html, h.baseDomain())
 			return
 		}
 	}
@@ -574,6 +579,23 @@ func (h *Hub) resolveDefaultViewerHTML() string {
 	return h.resolvePageHTML(data)
 }
 
+// pageViewable reports whether an HTML request for meta should render a
+// page-relation / inline-PAGE viewer. A PAGE always renders its inline HTML; a
+// page relation only renders when its target PAGE is present in the index (and
+// thus the store). Gating on availability keeps the ETag representation in step
+// with serveObject(Data): if the page can't be resolved, both fall back to the
+// raw BLOB, so the ETag must not claim HTML.
+func pageViewable(index *storage.Index, meta object.ObjectMeta) bool {
+	if meta.Type == "PAGE" {
+		return true
+	}
+	if meta.HasPageRelation && meta.PageRef != "" {
+		_, found := index.GetMeta(meta.PageRef)
+		return found
+	}
+	return false
+}
+
 // pageETagSuffix returns the ETag suffix for HTML representations.
 // Includes the page/viewer revision so browser caches invalidate when the PAGE changes.
 func pageETagSuffix(index *storage.Index, meta object.ObjectMeta, defaultViewerRef string) string {
@@ -648,6 +670,13 @@ func (h *Hub) baseDomain() string {
 		return h.Vhost.BaseDomain()
 	}
 	return ""
+}
+
+// writePageHTML writes a 200 text/html response, injecting the base-domain meta.
+func writePageHTML(w http.ResponseWriter, html, baseDomain string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	io.WriteString(w, injectBaseDomain(html, baseDomain))
 }
 
 // injectBaseDomain inserts a <meta name="dv-base-domain"> tag into PAGE HTML.
