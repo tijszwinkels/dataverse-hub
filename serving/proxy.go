@@ -797,21 +797,21 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 		}
 	}
 
-	// Build ETag and check 304 (same logic as Hub.handleGetObject)
+	// Build ETag and check 304 (same logic as Hub.handleGetObject). Precedence:
+	//   1. PAGE / page-relation viewer — for HTML-accepting clients only.
+	//   2. raw BLOB content negotiation — curl, */*, or a BLOB with no page relation.
+	//   3. generic default viewer — for HTML-accepting clients; never pre-empts a raw BLOB.
+	// This mirrors serveObjectData's body decision so the ETag matches what is served.
 	etag := `"` + strconv.Itoa(meta.Revision) + `"`
 	isHTML := false
-	if acceptsHTML(r) {
-		if meta.Type == "PAGE" || meta.HasPageRelation {
-			isHTML = true
-		} else if p.defaultViewerRef != "" && ref != p.defaultViewerRef {
-			isHTML = true
-		}
-	}
-	// BLOB content negotiation overrides the default viewer (but not PAGE/page-relation)
 	isBlob := false
-	if meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType) {
+	switch {
+	case acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation):
+		isHTML = true
+	case meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType):
 		isBlob = true
-		isHTML = false
+	case acceptsHTML(r) && p.defaultViewerRef != "" && ref != p.defaultViewerRef:
+		isHTML = true
 	}
 	if isHTML {
 		etag = etag[:len(etag)-1] + pageETagSuffix(p.index, meta, p.defaultViewerRef) + `"`
@@ -870,20 +870,28 @@ func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref stri
 		}
 	}
 
+	// A real page relation or inline PAGE renders the viewer for HTML-accepting
+	// clients, taking priority over raw BLOB serving — this is what lets a browser
+	// open a BLOB and see its attached viewer instead of raw bytes. The generic
+	// default viewer does NOT pre-empt a raw BLOB (it runs after serveBlob), so a
+	// BLOB with no page relation still serves its raw bytes to browsers.
+	if acceptsHTML(r) {
+		if html := p.resolvePageHTML(ref, data); html != "" {
+			writePageHTML(w, html, p.baseDomain())
+			return
+		}
+	}
+
 	if serveBlob(w, r, data) {
 		return
 	}
 
 	if acceptsHTML(r) {
-		html := p.resolvePageHTML(ref, data)
-		if html == "" && p.defaultViewerRef != "" && ref != p.defaultViewerRef {
-			html = p.resolveDefaultViewerHTML(ref)
-		}
-		if html != "" {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, injectBaseDomain(html, p.baseDomain()))
-			return
+		if p.defaultViewerRef != "" && ref != p.defaultViewerRef {
+			if html := p.resolveDefaultViewerHTML(ref); html != "" {
+				writePageHTML(w, html, p.baseDomain())
+				return
+			}
 		}
 		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
 	}
