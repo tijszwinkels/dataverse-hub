@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -931,6 +932,77 @@ func TestBlobServedAsBinaryForSafari(t *testing.T) {
 
 	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
 		t.Errorf("expected raw PNG bytes, got %d bytes", len(body))
+	}
+}
+
+// pageFixtureRef is the ref of the PAGE stored in page.json.
+const pageFixtureRef = "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.aaaaaaaa-bbbb-4ccc-dddd-eeeeeeeeeeee"
+
+// A BLOB that carries a real `page` relation must render the viewer PAGE — not
+// raw bytes — for browsers. Browsers send Accept: text/html,...,*/* and the
+// */* matches the BLOB mime, so raw serving used to win. The page-relation
+// viewer must take priority for HTML-accepting clients.
+func TestBlobWithPageRelationServedAsHTMLForBrowser(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	ref, data := makeBlobWithPageRelation(t, pageFixtureRef)
+	if resp := doPut(t, ts, ref, data); resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT blob: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+
+	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+	resp := doGetWithAccept(t, ts, "/"+ref, browserAccept)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html (page viewer wins over raw blob), got %q", ct)
+	}
+	// ETag must reflect the HTML representation, not the raw -blob suffix.
+	if etag := resp.Header.Get("ETag"); strings.HasSuffix(etag, `-blob"`) || !strings.Contains(etag, "-html") {
+		t.Errorf("expected an -html ETag for the viewer response, got %q", etag)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected page HTML, got: %s", body)
+	}
+}
+
+// A BLOB with a page relation must keep its current behavior for non-HTML
+// clients: curl-style Accept: */* gets raw bytes, application/json gets the
+// envelope. The page relation only pre-empts raw serving for HTML clients.
+func TestBlobWithPageRelationRawAndJSONUnchanged(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json")
+	ref, data := makeBlobWithPageRelation(t, pageFixtureRef)
+	if resp := doPut(t, ts, ref, data); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT blob failed: %d", resp.StatusCode)
+	}
+
+	// curl default Accept: */* -> raw PNG bytes
+	resp := doGetWithAccept(t, ts, "/"+ref, "*/*")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "image/png" {
+		t.Errorf("Accept */*: expected image/png raw, got %q", ct)
+	}
+	if len(body) < 4 || string(body[:4]) != "\x89PNG" {
+		t.Errorf("Accept */*: expected raw PNG bytes, got %d bytes", len(body))
+	}
+
+	// Accept: application/json -> JSON envelope
+	resp = doGetWithAccept(t, ts, "/"+ref, "application/json")
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var env object.Envelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("Accept json: expected envelope, got: %s", body)
 	}
 }
 

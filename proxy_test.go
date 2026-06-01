@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -92,6 +93,36 @@ func TestProxyPutAndGet(t *testing.T) {
 	json.Unmarshal(gotEnv.Item, &gotItem)
 	if gotItem.Ref() != ref {
 		t.Errorf("expected ref %s, got %s", ref, gotItem.Ref())
+	}
+}
+
+// In proxy mode, a BLOB with a page relation must also render the viewer PAGE
+// for browsers. The proxy syncs the page dependency (Phase 2) before serving,
+// then serveObjectData must prefer the viewer over raw BLOB bytes.
+func TestProxyBlobWithPageRelationServedAsHTML(t *testing.T) {
+	proxySrv, _, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	// PUT page + blob-with-page through the proxy (forwarded to root, cached).
+	putFixture(t, proxySrv, "page.json")
+	ref, data := makeBlobWithPageRelation(t, pageFixtureRef)
+	if resp := doPut(t, proxySrv, ref, data); resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT blob: expected 201, got %d: %s", resp.StatusCode, body)
+	}
+
+	browserAccept := "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+	resp := doGetWithAccept(t, proxySrv, "/"+ref, browserAccept)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html (page viewer wins over raw blob), got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected page HTML, got: %s", body)
 	}
 }
 
