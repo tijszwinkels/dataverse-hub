@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SHARED_REALM — Project Stages &amp; Status</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.65;
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem 4rem;
+    color: #e2e8f0;
+    background: #0f172a;
+  }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.4rem; color: #f8fafc; }
+  h2 { font-size: 1.4rem; font-weight: 600; margin-top: 2.5rem; margin-bottom: 0.75rem; color: #e2e8f0; border-bottom: 1px solid #334155; padding-bottom: 0.4rem; }
+  p { margin: 0.75rem 0; }
+  code { background: #1e293b; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.9em; color: #f8fafc; }
+  .lead { font-size: 1.05rem; color: #94a3b8; margin-bottom: 1.5rem; }
+
+  /* Progress meter */
+  .meter-wrap { margin: 1.5rem 0; }
+  .meter-track { background: #1e293b; border-radius: 9999px; height: 14px; overflow: hidden; border: 1px solid #334155; }
+  .meter-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #22c55e); border-radius: 9999px; transition: width .4s ease; }
+  .meter-labels { display: flex; justify-content: space-between; font-size: 0.85rem; color: #64748b; margin-top: 0.4rem; }
+
+  /* Timeline */
+  .timeline { position: relative; margin: 2rem 0 0; padding-left: 2rem; }
+  .timeline::before { content: ""; position: absolute; left: 0.55rem; top: 0.5rem; bottom: 0.5rem; width: 2px; background: #334155; }
+  .stage { position: relative; margin-bottom: 1.75rem; }
+  .stage-dot { position: absolute; left: -1.55rem; top: 0.35rem; width: 1.1rem; height: 1.1rem; border-radius: 50%; border: 3px solid #0f172a; }
+  .dot-done    { background: #22c55e; box-shadow: 0 0 0 2px #22c55e; }
+  .dot-current { background: #3b82f6; box-shadow: 0 0 0 2px #3b82f6; animation: pulse 1.8s ease-in-out infinite; }
+  .dot-todo    { background: #334155; box-shadow: 0 0 0 2px #475569; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 2px #3b82f6; } 50% { box-shadow: 0 0 0 6px rgba(59,130,246,0.25); } }
+
+  .stage-card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.1rem 1.25rem; }
+  .stage-card.done    { border-color: #166534; }
+  .stage-card.current { border-color: #3b82f6; box-shadow: 0 0 0 1px #3b82f6, 0 4px 14px rgba(59,130,246,0.15); }
+  .stage-card.todo    { opacity: 0.75; }
+  .stage-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  .stage-num { font-weight: 700; color: #f8fafc; font-size: 1.05rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
+  .badge-done    { background: #14532d; color: #86efac; }
+  .badge-current { background: #1e3a5f; color: #93c5fd; }
+  .badge-todo    { background: #334155; color: #94a3b8; }
+  .stage-title { font-weight: 600; color: #e2e8f0; flex: 1; min-width: 0; }
+  .stage-body { margin-top: 0.6rem; font-size: 0.95rem; color: #cbd5e1; }
+  .stage-body ul { padding-left: 1.1rem; margin: 0.4rem 0; }
+  .stage-body li { margin: 0.3rem 0; }
+  .files { margin-top: 0.5rem; font-size: 0.85rem; }
+  .files code { background: #0f172a; border: 1px solid #334155; }
+  .note { margin-top: 0.5rem; font-size: 0.88rem; color: #94a3b8; font-style: italic; }
+
+  .legend { display: flex; gap: 1.25rem; flex-wrap: wrap; margin: 1rem 0 0; font-size: 0.85rem; color: #94a3b8; }
+  .legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .swatch { width: 0.85rem; height: 0.85rem; border-radius: 50%; }
+  .sw-done { background: #22c55e; } .sw-cur { background: #3b82f6; } .sw-todo { background: #334155; border: 1px solid #475569; }
+
+  a { color: #93c5fd; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .cta { display: inline-block; margin-top: 1.25rem; background: #3b82f6; color: #fff; padding: 0.55rem 1rem; border-radius: 8px; font-weight: 600; font-size: 0.95rem; }
+  .cta:hover { background: #2563eb; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<h1>SHARED_REALM Access Control — Project Stages</h1>
+<p class="lead">Graph-native shared realm access for the dataverse hub. Below is the full roadmap and exactly where we stand.</p>
+
+<div class="meter-wrap">
+  <div class="meter-track"><div class="meter-fill" style="width: 38%;"></div></div>
+  <div class="meter-labels"><span>Stage 1 — Design</span><span>~38% overall</span><span>Stage 5 — Docs &amp; release</span></div>
+</div>
+
+<div class="legend">
+  <span><span class="swatch sw-done"></span> Done</span>
+  <span><span class="swatch sw-cur"></span> In progress</span>
+  <span><span class="swatch sw-todo"></span> Not started</span>
+</div>
+
+<h2>The five stages</h2>
+
+<div class="timeline">
+
+  <!-- Stage 1 -->
+  <div class="stage">
+    <div class="stage-dot dot-done"></div>
+    <div class="stage-card done">
+      <div class="stage-head">
+        <span class="stage-num">1</span>
+        <span class="stage-title">Design — define the type &amp; 8 decisions</span>
+        <span class="badge badge-done">Complete</span>
+      </div>
+      <div class="stage-body">
+        <p>Pulled the dataverse root node, read the <code>instructionGraph001</code> spec, surveyed the existing TOML-based shared-realm implementation, and designed a new graph-native <code>SHARED_REALM</code> type. Locked all 8 design decisions with you.</p>
+        <ul>
+          <li><strong>1</strong> Realm identity: explicit <code>content.realm</code></li>
+          <li><strong>2</strong> Member refs: pubkey-only (offline-friendly)</li>
+          <li><strong>3</strong> Ownership: prefix rule <code>{pubkey}.</code></li>
+          <li><strong>4</strong> Canonical object: UUIDv5 hash of realm name</li>
+          <li><strong>5</strong> Revocation: edit members in higher revision</li>
+          <li><strong>6</strong> Propagation: global via <code>dataverse001</code></li>
+          <li><strong>7</strong> Precedence: graph authoritative, TOML override</li>
+          <li><strong>8</strong> Naming: <code>type:"SHARED_REALM"</code>, relation <code>"member"</code></li>
+        </ul>
+        <div class="files">Artifacts: <code>/work/design.html</code> · <code>/work/design.md</code> · <code>/work/dataverse_spec.md</code> · <code>/work/root_node_raw.json</code></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stage 2 -->
+  <div class="stage">
+    <div class="stage-dot dot-done"></div>
+    <div class="stage-card done">
+      <div class="stage-head">
+        <span class="stage-num">2</span>
+        <span class="stage-title">Deterministic addressing layer (<code>realm.RealmID</code> / <code>RealmRef</code>)</span>
+        <span class="badge badge-done">Complete</span>
+      </div>
+      <div class="stage-body">
+        <p>Implemented UUIDv5 hashing so any hub can compute the canonical ref <code>{owner}.{uuid_v5(NS, realm)}</code> without a lookup table. Verified byte-for-byte interoperable with Python's <code>uuid.uuid5</code>. Code review run; all findings fixed (empty-name bug, parser hardening, edge-case tests).</p>
+        <div class="files">Code: <code>realm/realmid.go</code> · <code>realm/realmid_test.go</code> · playbook <code>/work/TEST_PLAYBOOK.md</code></div>
+        <p class="note">Builds clean · <code>go vet</code> clean · all tests pass (one pre-existing flaky proxy timing test, unrelated).</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stage 3 -->
+  <div class="stage">
+    <div class="stage-dot dot-current"></div>
+    <div class="stage-card current">
+      <div class="stage-head">
+        <span class="stage-num">3</span>
+        <span class="stage-title">Graph membership reader — <code>realm/graph.go</code></span>
+        <span class="badge badge-current">Next up</span>
+      </div>
+      <div class="stage-body">
+        <p>Parse <code>SHARED_REALM</code> objects from the store into a membership lookup that satisfies the same interface as the existing <code>SharedRealms</code> (<code>IsSharedRealm</code>, <code>IsMember</code>, <code>RealmsForPubkey</code>, <code>Count</code>).</p>
+        <ul>
+          <li>New <code>GraphSharedRealms</code> struct + parser</li>
+          <li>For each <code>type:"SHARED_REALM"</code> object: read <code>content.realm</code>, verify <code>item.id == RealmID(realm)</code> &amp; prefix ownership, extract member pubkeys from <code>relations.member</code></li>
+          <li>Index hook: recompute on PUT / index rebuild</li>
+          <li>Unit tests: parse, validate, reject malformed, conflict (higher revision wins)</li>
+        </ul>
+        <div class="files">Planned: <code>realm/graph.go</code> · <code>realm/graph_test.go</code></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stage 4 -->
+  <div class="stage">
+    <div class="stage-dot dot-todo"></div>
+    <div class="stage-card todo">
+      <div class="stage-head">
+        <span class="stage-num">4</span>
+        <span class="stage-title">Hub wiring — read gating, PUT validation, <code>/auth/realms</code></span>
+        <span class="badge badge-todo">Not started</span>
+      </div>
+      <div class="stage-body">
+        <p>Switch the hub from TOML-only to graph-authoritative + TOML-override (decision 7). Touch points across the serving layer:</p>
+        <ul>
+          <li><code>realm.CanRead</code> / <code>ValidateRealmsForPut</code> consult merged source (graph + TOML)</li>
+          <li>PUT validation: reject <code>SHARED_REALM</code> unless <code>content.realm</code> owner-prefixed, signer owns it, <code>id == RealmID(realm)</code></li>
+          <li><code>GET /auth/realms</code> lists realms the caller belongs to (graph + TOML)</li>
+          <li><code>main.go</code> SIGHUP reload merges graph + TOML</li>
+          <li>Proxy mode: resolve missing REALM objects from upstream</li>
+          <li>Integration tests against a running hub</li>
+        </ul>
+        <div class="files">Planned: edits to <code>realm/realm.go</code> · <code>serving/handlers.go</code> · <code>serving/proxy.go</code> · <code>main.go</code> + new <code>shared_realms_graph_test.go</code></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stage 5 -->
+  <div class="stage">
+    <div class="stage-dot dot-todo"></div>
+    <div class="stage-card todo">
+      <div class="stage-head">
+        <span class="stage-num">5</span>
+        <span class="stage-title">Docs &amp; spec — README, <code>hub.example.toml</code>, spec text</span>
+        <span class="badge badge-todo">Not started</span>
+      </div>
+      <div class="stage-body">
+        <p>Document the new type for humans and agents, and align all reference docs.</p>
+        <ul>
+          <li>README "Shared realms" section: graph-native format + TOML override</li>
+          <li><code>hub.example.toml</code> comments on TOML-as-override</li>
+          <li><code>item.instruction</code> text for SHARED_REALM objects (self-describing)</li>
+          <li>Publish a canonical example SHARED_REALM object</li>
+        </ul>
+        <div class="files">Planned: <code>README.md</code> · <code>hub.example.toml</code></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<h2>Where we are right now</h2>
+<p>Stages <strong>1</strong> (design) and <strong>2</strong> (deterministic addressing layer) are <strong>complete and reviewed</strong>. We are at the boundary of <strong>Stage 3</strong>: the graph membership reader. Nothing in the hub's read path or PUT path has changed yet — the existing TOML-based <code>SharedRealms</code> is still the only thing consulted by <code>realm.CanRead</code> and <code>ValidateRealmsForPut</code>.</p>
+
+<p><strong>Next action:</strong> implement <code>realm/graph.go</code> (<code>GraphSharedRealms</code> + parser + tests), then wire it into the hub in Stage 4.</p>
+
+<a class="cta" href="/design.html">View the full design page →</a>
+
+</body>
+</html>

@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Shared-Realm Access Control — Design Proposal</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 2rem 1.5rem;
+    color: #e2e8f0;
+    background: #0f172a;
+  }
+  h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; color: #f8fafc; }
+  h2 { font-size: 1.4rem; font-weight: 600; margin-top: 2.5rem; margin-bottom: 0.75rem; color: #e2e8f0; border-bottom: 1px solid #334155; padding-bottom: 0.4rem; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin-top: 1.5rem; margin-bottom: 0.5rem; color: #cbd5e1; }
+  p { margin: 0.75rem 0; }
+  code { background: #1e293b; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.9em; color: #f8fafc; }
+  pre { background: #020617; color: #e2e8f0; padding: 1rem 1.25rem; border-radius: 8px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; border: 1px solid #334155; }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin: 1.5rem 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+  .card-title { font-weight: 600; font-size: 1.05rem; margin-bottom: 0.75rem; color: #f8fafc; }
+  .decision { border-left: 4px solid #60a5fa; padding-left: 1rem; margin-bottom: 1.5rem; }
+  .decision h3 { margin-top: 0; }
+  .decision-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+  .option { background: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 0.875rem 1rem; }
+  .option-label { font-weight: 600; color: #e2e8f0; margin-bottom: 0.35rem; }
+  .option-desc { font-size: 0.9rem; color: #94a3b8; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+  .badge-green { background: #14532d; color: #86efac; }
+  .badge-yellow { background: #713f12; color: #fde047; }
+  .badge-red { background: #7f1d1d; color: #fca5a5; }
+  .badge-blue { background: #1e3a5f; color: #93c5fd; }
+  ul { padding-left: 1.25rem; }
+  li { margin: 0.4rem 0; }
+  .toc { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 1.25rem 1.5rem; margin-bottom: 2rem; }
+  .toc h2 { margin-top: 0; font-size: 1.1rem; color: #f8fafc; }
+  .toc a { text-decoration: none; color: #93c5fd; font-size: 0.95rem; }
+  .toc a:hover { text-decoration: underline; color: #bfdbfe; }
+  .toc ul { list-style: none; padding-left: 0; margin: 0.5rem 0 0; }
+  .toc li { margin: 0.35rem 0; }
+  .toc ul ul { margin-left: 1.25rem; padding-left: 0.75rem; border-left: 2px solid #334155; }
+  .footer { margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid #334155; color: #64748b; font-size: 0.9rem; }
+  .kbd { background: #1e293b; border: 1px solid #334155; border-radius: 4px; padding: 0.1rem 0.4rem; font-family: monospace; font-size: 0.85em; }
+</style>
+</head>
+<body>
+
+<nav class="toc" id="toc">
+  <h2>Contents</h2>
+  <ul>
+    <li><a href="#goal">Goal</a></li>
+    <li><a href="#current-state">Current State</a></li>
+    <li><a href="#proposed-type">Proposed Type: <code>REALM</code></a>
+      <ul>
+        <li><a href="#object-shape">Object Shape</a></li>
+      </ul>
+    </li>
+    <li><a href="#design-decisions">Open Design Decisions</a>
+      <ul>
+        <li><a href="#d1-realm-identity">1. Realm Identity</a></li>
+        <li><a href="#d2-member-refs">2. Member Refs: Pubkey-Only vs Require IDENTITY</a></li>
+        <li><a href="#d3-ownership">3. Ownership / Authorization</a></li>
+        <li><a href="#d4-conflicts">4. Conflict Resolution</a></li>
+        <li><a href="#d5-revocation">5. Revocation / Removal</a></li>
+        <li><a href="#d6-propagation">6. Propagation of REALM Objects</a></li>
+        <li><a href="#d7-precedence">7. TOML vs Graph Precedence</a></li>
+        <li><a href="#d8-naming">8. Naming</a></li>
+      </ul>
+    </li>
+    <li><a href="#hub-impl">Hub Implementation Plan (Phase 2)</a></li>
+  </ul>
+</nav>
+
+<h1>Shared-Realm Access Control — A New <code>instructionGraph001</code> Type</h1>
+
+<div class="card" style="border-color: #3b82f6;">
+  <div class="card-title" style="color: #93c5fd;">Decisions Status</div>
+  <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.5rem; font-size: 0.9rem;">
+    <div>1. Realm identity <span class="badge badge-green">EXPLICIT</span></div>
+    <div>2. Member refs <span class="badge badge-green">PUBKEY-ONLY</span></div>
+    <div>3. Ownership <span class="badge badge-green">PREFIX RULE</span></div>
+    <div>4. Canonical obj <span class="badge badge-green">UUIDv5 HASH</span></div>
+    <div>5. Revocation <span class="badge badge-green">EDIT MEMBERS</span></div>
+    <div>6. Propagation <span class="badge badge-green">GLOBAL</span></div>
+    <div>7. Precedence <span class="badge badge-green">GRAPH</span></div>
+    <div>8. Naming <span class="badge badge-green">SHARED_REALM</span></div>
+  </div>
+</div>
+
+<section id="goal" class="card">
+  <div class="card-title">Goal</div>
+  <p>Define a graph-native object type that declares which pubkeys have read access to a <strong>shared realm</strong>, so any hub can decide shared-realm access from the graph itself — not only from hub-operator TOML config.</p>
+</section>
+
+<section id="current-state">
+  <h2>Current State</h2>
+  <div class="card">
+    <div class="card-title">How it works today</div>
+    <p>Shared-realm membership is configured out-of-band in <code>hub.toml</code>:</p>
+    <pre><code>[realms."AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.MyTeam"]
+members = ["AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ", "BzxY7_other_pubkey_here"]</code></pre>
+    <ul>
+      <li>Parsed at startup / on <code>SIGHUP</code> by <code>loadRealmsFromFile</code> in <code>config.go</code></li>
+      <li>Held in memory by <code>realm.SharedRealms</code> (<code>realm/shared.go</code>)</li>
+      <li>Consulted by <code>realm.CanRead</code> / <code>ValidateRealmsForPut</code> in <code>realm/realm.go</code></li>
+    </ul>
+  </div>
+  <div class="card" style="border-color: #f87171; background: #7f1d1d;">
+    <div class="card-title" style="color: #fca5a5;">Problem</div>
+    <p>Membership is <strong>not signed, not portable, not discoverable by other hubs</strong>. It contradicts the dataverse philosophy: the graph should be <em>self-describing and transport-agnostic</em>. The format spec explicitly says realm semantics are left to deployments — we should move them into the graph.</p>
+  </div>
+</section>
+
+<section id="proposed-type">
+  <h2>Proposed Type: <code>REALM</code></h2>
+
+  <div id="object-shape" class="card">
+    <div class="card-title">Object Shape</div>
+    <p>A <code>type="SHARED_REALM"</code> object names a shared realm (in <code>content.realm</code>) and lists its members as <code>relations.member</code> entries. Its <code>id</code> is the <strong>deterministic hash of the realm string</strong> (decision 4), so the object lives at a computable address.</p>
+    <pre><code>{
+  "is": "instructionGraph001",
+  "signature": "&lt;base64 ECDSA over item&gt;",
+  "item": {
+    "in": ["dataverse001", "&lt;owner-pubkey&gt;"],
+    "ref": "&lt;owner-pubkey&gt;.&lt;uuid_v5(realm)&gt;",
+    "id": "&lt;uuid_v5(NAMESPACE, content.realm)&gt;",
+    "pubkey": "&lt;owner-pubkey&gt;",
+    "created_at": "&lt;iso8601&gt;",
+    "updated_at": "&lt;iso8601&gt;",
+    "revision": 1,
+    "type": "SHARED_REALM",
+    "name": "Acme Team",
+    "instruction": "A shared realm. Listed members have read access to objects carrying this realm name in item.in.",
+    "content": {
+      "realm": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.AcmeTeam"
+    },
+    "relations": {
+      "member": [
+        { "ref": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.346bef5e-..." },
+        { "ref": "BzxY7_...a1b2c3d4..." }
+      ]
+    },
+    "rights": { "license": "CC0-1.0", "ai_training_allowed": true }
+  }
+}</code></pre>
+  </div>
+
+  <p style="margin-top: 1.5rem;"><strong>Key fields:</strong></p>
+  <ul>
+    <li><code>content.realm</code> — the exact realm string that other objects put in their <code>item.in</code></li>
+    <li><code>relations.member[]</code> — array of refs; the pubkey portion identifies the member</li>
+    <li><code>item.in</code> — should include the owner's identity realm; optionally <code>dataverse001</code> for global propagation</li>
+    <li><code>revision</code> — standard conflict resolution: highest revision wins on sync</li>
+  </ul>
+</section>
+
+<section id="design-decisions">
+  <h2>Open Design Decisions</h2>
+  <p style="color: #64748b;">We need your call on each of these before locking the type definition.</p>
+
+  <div id="d1-realm-identity" class="decision">
+    <h3>1. Realm Identity: Explicit Field vs Derived</h3>
+    <p>Where does the realm string (what goes in <code>item.in</code> of member objects) come from?</p>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">A. Explicit <code>content.realm</code> <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Store the exact realm string in <code>content.realm</code>. Decouples human-readable <code>name</code> from the access-control identifier. Rename without invalidating member objects.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">B. Derived from owner + slug</div>
+        <div class="option-desc"><code>{owner-pubkey}.{slugified-name}</code>. Matches the existing README convention <code>{owner-pubkey}.{Name}</code>. No extra field. Con: rename breaks it — all member objects would need updates.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d2-member-refs" class="decision">
+    <h3>2. Member Refs: Pubkey-Only vs Require Resolvable IDENTITY</h3>
+    <p>When a REALM object lists <code>member</code> refs, what does access grant to?</p>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">A. Pubkey-only (offline-friendly) <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Access granted to the pubkey embedded in the member ref (<code>ref.split(".")[0]</code>). No fetch needed. Works offline. Member doesn't need to have published an IDENTITY object.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">B. Require resolvable IDENTITY</div>
+        <div class="option-desc">Member ref must point to an IDENTITY object the hub can resolve; access granted to that identity's pubkey. Stronger linking, enables revocation via IDENTITY update. But introduces fetch dependency — not offline-friendly.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d3-ownership" class="decision">
+    <h3>3. Ownership / Authorization to Define Members</h3>
+    <p>Who is allowed to author a REALM object for a given realm?</p>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">A. Prefix rule: <code>{signer-pubkey}.</code> owns its namespace <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Realm string in <code>content.realm</code> must start with the signer's pubkey. Matches the existing composite-key identity model and README convention. Simple, self-consistent.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">B. First-writer wins / highest revision wins</div>
+        <div class="option-desc">Whoever created the lowest-revision object for a realm name owns it. Later conflicting objects ignored unless higher revision from same owner. More flexible but needs full history.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">C. Explicit <code>owner</code> relation</div>
+        <div class="option-desc">Separate <code>relations.owner: [{ref: "...identity..."}]</code> pointing to the root identity. Explicit, auditable, but another field to maintain.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d4-conflicts" class="decision">
+    <h3>4. Canonical Object: How Does the Hub Find It? <span class="badge badge-green">DECIDED</span></h3>
+    <p><strong>Decision:</strong> One canonical object per realm name, addressed by hashing the realm name to a deterministic UUIDv5.</p>
+
+    <div class="card" style="margin-top: 1rem;">
+      <div class="card-title">The core problem</div>
+      <p>Objects are addressed by composite key <code>{pubkey}.{uuid}</code>. But realm names are arbitrary strings living in <code>content.realm</code>. So when a hub needs the access list for realm <code>X</code>, it faces two questions:</p>
+      <ol>
+        <li><strong>Addressability</strong> — how do we go from the string <code>X</code> to the specific object that defines it?</li>
+        <li><strong>Canonicality</strong> — what guarantees that object is <em>the</em> authoritative one, not a forgery or stale copy?</li>
+      </ol>
+    </div>
+
+    <div class="card" style="border-color: #3b82f6;">
+      <div class="card-title" style="color: #93c5fd;">Proposal: Hash the realm name → deterministic UUID</div>
+      <p>Derive the object's <code>id</code> deterministically from the realm name. Then the canonical object lives at a <strong>predictable, computable address</strong> — any hub can find it without searching:</p>
+      <pre><code>id  = uuid_v5(NAMESPACE, realm_name)
+ref = "{owner-pubkey}.{id}"
+
+// example:
+// realm = "AxyU5_...MyTeam"
+// id    = 56390347-d50c-5dce-970f-b0a0c7abb6de
+// ref   = AxyU5_...MyTeam.56390347-d50c-5dce-970f-b0a0c7abb6de</code></pre>
+      <p>This combines beautifully with decisions 1 &amp; 3:</p>
+      <ul>
+        <li><strong>Decision 3 (prefix rule)</strong> means the realm name <em>already</em> starts with <code>{owner-pubkey}.</code>. So the owner is encoded in the realm string itself.</li>
+        <li><strong>Decision 1 (explicit <code>content.realm</code>)</strong> means the realm string is the canonical identifier, not derived from <code>name</code>.</li>
+        <li>The hash makes the object's <code>id</code> a pure function of the realm string — <strong>no lookup table needed</strong>. Given realm <code>X</code>, the hub computes <code>ref = X.split(".")[0] + "." + hash(X)</code> and fetches directly.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Why this guarantees canonicality</div>
+      <p>Because the address is deterministic, <strong>there can only be one object per realm per owner</strong>. The composite key <code>{pubkey}.{hash(realm)}</code> is unique by construction:</p>
+      <ul>
+        <li>A second object claiming the same realm from the same owner would collide on the same composite key → it's an <em>update</em> (higher <code>revision</code> wins), not a duplicate.</li>
+        <li>A different signer trying to claim the same realm name is rejected by <strong>decision 3</strong> (prefix rule) — they can't sign under <code>{owner-pubkey}.</code> unless they own that key.</li>
+        <li>An attacker can't squat the address either: they'd need to sign with the owner's private key to produce a valid object at that ref.</li>
+      </ul>
+      <p>So the hub's algorithm is: <code>compute ref → fetch → verify signature → read members</code>. No scanning, no ambiguity, no election.</p>
+    </div>
+
+    <div class="card" style="border-color: #22c55e;">
+      <div class="card-title" style="color: #86efac;">Exact hashing spec</div>
+      <p><strong>Algorithm:</strong> UUIDv5 (RFC 4122 §4.3) — SHA-1 over <code>namespace_bytes || name_bytes</code>, take the first 16 bytes, set the version (5) and variant (10) bits, format as canonical 8-4-4-4-12 lowercase hex.</p>
+      <p><strong>Namespace UUID:</strong> <code>00000000-0000-0000-0000-000000000000</code> (the dataverse root node's UUID). Clean, well-known, unmistakable, and ties derived realm IDs to the dataverse itself.</p>
+      <p><strong>Name (hash input):</strong> the realm string exactly as it appears in <code>content.realm</code> — i.e. the full <code>{owner-pubkey}.{Name}</code> string, UTF-8 bytes, no normalization, no trailing newline.</p>
+      <p><strong>Output:</strong> a standard UUIDv5, used verbatim as <code>item.id</code> and as the <code>id</code> portion of <code>item.ref</code>.</p>
+      <p><strong>Why UUIDv5 over SHA-256-truncated:</strong> UUIDv5 is a <em>real standard</em>. Any implementation in any language produces the identical address from the identical realm string — one line in Python (<code>uuid.uuid5(NS, name)</code>), JS (<code>uuid.v5</code>), Go, etc. A custom SHA-256 scheme would force every implementer to agree on byte-slicing &amp; bit-twiddling by reading our spec. Interoperability is the whole point, so we use the standard.</p>
+      <pre><code>// Pseudocode (RFC 4122 §4.3):
+namespace = parse_uuid("00000000-0000-0000-0000-000000000000")
+hash      = SHA1( namespace_bytes || utf8(realm_string) )
+id16      = hash[0:16]
+id16[6]   = (id16[6] &amp; 0x0f) | 0x50   // version = 5
+id16[8]   = (id16[8] &amp; 0x3f) | 0x80   // variant = 10
+item.id   = format_uuid(id16)        // e.g. 56390347-d50c-5dce-970f-b0a0c7abb6de</code></pre>
+    </div>
+
+    <div class="card" style="border-color: #22c55e;">
+      <div class="card-title" style="color: #86efac;">Interoperability proof (Go == Python stdlib)</div>
+      <p>The Go reference implementation in <code>realm/realmid.go</code> was verified to produce byte-identical output to Python's <code>uuid.uuid5</code>:</p>
+      <pre><code>$ python3 -c 'import uuid; print(uuid.uuid5(
+    uuid.UUID("00000000-0000-0000-0000-000000000000"),
+    "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.AcmeTeam"))'
+6bb7d6cc-1556-5a76-a910-edc802d4a2b7
+
+$ go test ./realm/ -run TestRealmID_MatchesStandardUUIDv5 -v
+--- PASS: TestRealmID_MatchesStandardUUIDv5
+    --- PASS: .../AcmeTeam   (got 6bb7d6cc-1556-5a76-a910-edc802d4a2b7)
+    --- PASS: .../MyTeam     (got 56390347-d50c-5dce-970f-b0a0c7abb6de)</code></pre>
+      <p>No external dependency needed — Go's stdlib <code>crypto/sha1</code> suffices. Tests in <code>realm/realmid_test.go</code> pin the algorithm to the standard values.</p>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Enforcement at write time</div>
+      <p><strong>PUT validation:</strong> the hub rejects a <code>SHARED_REALM</code> PUT unless:</p>
+      <ul>
+        <li><code>content.realm</code> is owner-prefixed: <code>realm.split('.')[0]</code> is a valid pubkey (decision 3);</li>
+        <li><code>item.pubkey</code> equals that owner (the signer owns the namespace);</li>
+        <li><code>item.id == RealmID(content.realm)</code> — the deterministic-address contract.</li>
+      </ul>
+      <p>A mismatch on any of these = <code>400</code>. This guarantees readers can always trust the computed address: <code>owner + "." + RealmID(realm)</code> always points at the one canonical object.</p>
+    </div>
+
+    <div class="card" style="border-color: #22c55e;">
+      <div class="card-title" style="color: #86efac;">Summary of the proposed scheme</div>
+      <pre><code>// Realm string (in content.realm, and in member objects' item.in):
+//   "{owner-pubkey}.{Name}"
+//
+// Canonical SHARED_REALM object address:
+//   id  = uuid_v5("00000000-0000-0000-0000-000000000000", realm_string)
+//   ref = "{owner-pubkey}.{id}"
+//
+// Hub resolution:
+//   1. Given realm R, owner = R.split(".")[0]
+//   2. id = uuid_v5(NAMESPACE, R)
+//   3. ref = owner + "." + id
+//   4. fetch(ref) from store/upstream
+//   5. verify signature by owner
+//   6. read relations.members → extract pubkeys
+//   7. (TOML override applies on top — decision 7)</code></pre>
+    </div>
+  </div>
+
+  <div id="d5-revocation" class="decision">
+    <h3>5. Revocation / Removal</h3>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">A. Edit members in higher revision (implicit revoke) <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Remove a pubkey from <code>relations.member</code> in a new REALM revision — they lose access. Standard revision semantics handle it. Combined with decision 4's deterministic address, this is just a PUT to the same computed ref with a higher revision.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">B. Add explicit <code>blocked</code> deny-list relation</div>
+        <div class="option-desc"><code>relations.blocked</code> overrides <code>member</code>. Useful for "ban" semantics that survive re-addition, or when you want audit trail of explicit denials.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d6-propagation" class="decision">
+    <h3>6. Propagation of REALM Objects Themselves</h3>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">A. Global (<code>dataverse001</code>) <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">REALM objects include <code>dataverse001</code> in <code>item.in</code> and propagate globally. Any hub can discover the access list by computing the deterministic address. Member roster is world-readable.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">B. Owner-private (identity realm only)</div>
+        <div class="option-desc">REALM objects only in owner's identity realm. Synced only among hubs the owner pushes to. Member roster is private. NOT world-readable.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d7-precedence" class="decision">
+    <h3>7. TOML vs Graph Precedence</h3>
+    <div class="decision-options">
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label">Graph authoritative, TOML override <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Graph SHARED_REALM object → TOML (operator force-add/remove) → deny by default. Graph is source of truth; TOML is emergency kill-switch / local override.</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label">TOML takes precedence</div>
+        <div class="option-desc">Operator config always wins. Hub operators retain full control regardless of what the graph says.</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="d8-naming" class="decision">
+    <h3>8. Naming</h3>
+    <div class="decision-options">
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label"><code>type: "REALM"</code> / relation <code>"member"</code></div>
+        <div class="option-desc">Short, matches realm terminology. <code>REALM</code> as noun for the type; <code>member</code> as verb-like relation name.</div>
+      </div>
+      <div class="option" style="border-color: #22c55e;">
+        <div class="option-label"><code>type: "SHARED_REALM"</code> / relation <code>"member"</code> <span class="badge badge-green">DECIDED</span></div>
+        <div class="option-desc">Explicit that it's a shared realm. The <code>member</code> relation (singular, one entry per member) is consistent with existing relation conventions in the spec (<code>author</code>, <code>replies_to</code>).</div>
+      </div>
+      <div class="option" style="opacity: 0.5;">
+        <div class="option-label"><code>type: "ACCESS_LIST"</code> / relation <code>"grants_access"</code></div>
+        <div class="option-desc">Describes what it <em>does</em> rather than what it <em>is</em>.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="hub-impl">
+  <h2>Hub Implementation Plan (Phase 2 — After Design Locked)</h2>
+  <div class="card">
+    <ul>
+      <li><strong>New file:</strong> <code>realm/graph.go</code> — parses REALM objects from the store into a <code>GraphSharedRealms</code> satisfying the same interface as <code>SharedRealms</code> (<code>IsSharedRealm</code>, <code>IsMember</code>, <code>RealmsForPubkey</code>, <code>Count</code>).</li>
+      <li><strong>Index hook:</strong> when a <code>type=REALM</code> object is PUT / rebuilt, (re)compute membership for its <code>content.realm</code>.</li>
+      <li><strong>Merge sources:</strong> <code>realm.CanRead</code> / <code>ValidateRealmsForPut</code> consult the merged source (graph + TOML override) instead of TOML alone.</li>
+      <li><strong><code>GET /auth/realms</code>:</strong> lists realms the caller is a member of — sourced from both graph REALM objects and TOML.</li>
+      <li><strong>Keep TOML</strong> as optional override for hub operators.</li>
+    </ul>
+  </div>
+</section>
+
+<footer class="footer">
+  <p>Generated from <code>/work/design.md</code>. Edit the markdown and regenerate, or edit this HTML directly. </p>
+</footer>
+
+<script>
+// Smooth scroll for TOC links
+document.querySelectorAll('#toc a').forEach(a => {
+  a.addEventListener('click', e => {
+    e.preventDefault();
+    const target = document.querySelector(a.getAttribute('href'));
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+});
+
+// Highlight active section in TOC
+const sections = document.querySelectorAll('section[id]');
+const tocLinks = document.querySelectorAll('#toc a');
+const observer = new IntersectionObserver(entries => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.id;
+      tocLinks.forEach(link => {
+        link.style.fontWeight = link.getAttribute('href') === '#' + id ? '600' : '400';
+      });
+    }
+  });
+}, { rootMargin: '-100px 0px -66%' });
+sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
