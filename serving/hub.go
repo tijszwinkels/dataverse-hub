@@ -53,7 +53,7 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/auth/challenge", h.auth.HandleChallenge)
 	r.Post("/auth/token", h.auth.HandleToken)
 	r.Post("/auth/logout", h.auth.HandleLogout)
-	r.Get("/auth/realms", handleAuthRealms(h.shared))
+	r.Get("/auth/realms", handleAuthRealms(h.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
@@ -67,14 +67,17 @@ func (h *Hub) Router() http.Handler {
 
 // handleAuthRealms returns a handler for GET /auth/realms.
 // Returns the shared realms the authenticated user belongs to.
-func handleAuthRealms(shared *realm.SharedRealms) http.HandlerFunc {
+func handleAuthRealms(resolver realm.RealmResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authPK := auth.AuthPubkey(r)
 		if authPK == "" {
 			writeError(w, http.StatusUnauthorized, "authentication required", "UNAUTHORIZED")
 			return
 		}
-		realms := shared.RealmsForPubkey(authPK)
+		var realms []string
+		if resolver != nil {
+			realms = resolver.RealmsForPubkey(authPK)
+		}
 		if realms == nil {
 			realms = []string{}
 		}

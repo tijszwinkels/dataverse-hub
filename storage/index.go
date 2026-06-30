@@ -18,17 +18,54 @@ type Index struct {
 	inbound  map[string][]object.RelationEntry // target_ref -> sources pointing at it
 	byPubkey map[string][]string               // pubkey -> refs owned by that key
 	meta     map[string]object.ObjectMeta      // ref -> metadata
-	shared   *realm.SharedRealms               // shared realm config (for access checks)
+	shared   *realm.SharedRealms               // TOML shared realm config (override)
+	graph    *realm.GraphSharedRealms          // graph-shared realm membership
+	resolver realm.RealmResolver               // merged resolver (graph + TOML); nil => none
 }
 
-// NewIndex creates an empty index.
+// NewIndex creates an empty index. shared is the optional TOML override config.
 func NewIndex(shared *realm.SharedRealms) *Index {
+	g := realm.NewGraphSharedRealms()
 	return &Index{
 		inbound:  make(map[string][]object.RelationEntry),
 		byPubkey: make(map[string][]string),
 		meta:     make(map[string]object.ObjectMeta),
 		shared:   shared,
+		graph:    g,
+		resolver: realm.NewMerged(g, shared),
 	}
+}
+
+// SetGraphRealms replaces the graph-shared realm index. Must be called before
+// Rebuild so that SHARED_REALM objects are ingested into the new instance.
+// Recomputes the merged resolver from graph + TOML.
+func (idx *Index) SetGraphRealms(g *realm.GraphSharedRealms) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.graph = g
+	idx.resolver = realm.NewMerged(g, idx.shared)
+}
+
+// Resolver returns the merged shared-realm resolver (graph authoritative +
+// TOML override). Returns nil if neither is configured.
+func (idx *Index) Resolver() realm.RealmResolver {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	if idx.resolver != nil {
+		return idx.resolver
+	}
+	// Fallback if SetGraphRealms was never called: TOML-only.
+	if idx.shared != nil {
+		return idx.shared
+	}
+	return idx.graph // empty graph resolver (always-empty, harmless)
+}
+
+// GraphRealms returns the graph-shared realm index (for ingestion by callers).
+func (idx *Index) GraphRealms() *realm.GraphSharedRealms {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	return idx.graph
 }
 
 // InboundFilters are the optional filters for inbound queries.
@@ -54,6 +91,10 @@ func (idx *Index) Rebuild(store *Store) (int, time.Duration, error) {
 	idx.inbound = make(map[string][]object.RelationEntry)
 	idx.byPubkey = make(map[string][]string)
 	idx.meta = make(map[string]object.ObjectMeta)
+	if idx.graph != nil {
+		idx.graph.Load(nil) // clear graph membership; re-ingested via addLocked
+	}
+	idx.resolver = realm.NewMerged(idx.graph, idx.shared)
 
 	count := 0
 	for _, ref := range refs {
@@ -125,7 +166,7 @@ func (idx *Index) GetInbound(targetRef string, filters InboundFilters, authPubke
 		if !ok {
 			continue
 		}
-		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.resolver) {
 			continue
 		}
 		if membersOnly && !idx.passesMembersOnlyFilter(m) {
@@ -157,7 +198,7 @@ func (idx *Index) GetByPubkey(pubkey, typeFilter, authPubkey string, membersOnly
 		if !ok {
 			continue
 		}
-		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.resolver) {
 			continue
 		}
 		if membersOnly && !idx.passesMembersOnlyFilter(m) {
@@ -185,7 +226,7 @@ func (idx *Index) GetAll(pubkey, typeFilter, authPubkey string, membersOnly bool
 
 	var result []object.ObjectMeta
 	for _, m := range idx.meta {
-		if !realm.CanRead(m.Realms, authPubkey, idx.shared) {
+		if !realm.CanRead(m.Realms, authPubkey, idx.resolver) {
 			continue
 		}
 		if membersOnly && !idx.passesMembersOnlyFilter(m) {
@@ -208,15 +249,15 @@ func (idx *Index) passesMembersOnlyFilter(m object.ObjectMeta) bool {
 	if m.IsPublic {
 		return true
 	}
-	if idx.shared == nil {
+	if idx.resolver == nil {
 		return true
 	}
 	// Check if any of the object's realms is a shared realm
 	hasSharedRealm := false
 	for _, r := range m.Realms {
-		if idx.shared.IsSharedRealm(r) {
+		if idx.resolver.IsSharedRealm(r) {
 			hasSharedRealm = true
-			if idx.shared.IsMember(r, m.Pubkey) {
+			if idx.resolver.IsMember(r, m.Pubkey) {
 				return true // signer is a member of this shared realm
 			}
 		}
@@ -320,6 +361,11 @@ func (idx *Index) addLocked(ref string, item *object.Item, ts time.Time, realms 
 			})
 		}
 	}
+
+	// Ingest SHARED_REALM objects into the graph membership index.
+	if item.Type == realm.TypeSharedRealm && idx.graph != nil {
+		idx.graph.Add(item)
+	}
 }
 
 // removeLocked removes from all index maps. Caller must hold write lock.
@@ -327,6 +373,11 @@ func (idx *Index) removeLocked(ref string) {
 	m, ok := idx.meta[ref]
 	if !ok {
 		return
+	}
+
+	// Drop graph-shared realm membership if this was a SHARED_REALM object.
+	if m.Type == realm.TypeSharedRealm && idx.graph != nil {
+		idx.graph.Remove(ref)
 	}
 
 	// Remove from byPubkey

@@ -79,7 +79,7 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/auth/challenge", p.auth.HandleChallenge)
 	r.Post("/auth/token", p.auth.HandleToken)
 	r.Post("/auth/logout", p.auth.HandleLogout)
-	r.Get("/auth/realms", handleAuthRealms(p.shared))
+	r.Get("/auth/realms", handleAuthRealms(p.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
@@ -115,7 +115,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		if meta, found := p.index.GetMeta(resolved); found && !meta.IsPublic {
 			authPK := auth.AuthPubkey(r)
-			if !realm.CanRead(meta.Realms, authPK, p.shared) {
+			if !realm.CanRead(meta.Realms, authPK, p.index.Resolver()) {
 				servePrivatePageLogin(w)
 				return
 			}
@@ -281,11 +281,32 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
-	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.shared) {
+	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.index.Resolver()) {
 		writeError(w, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
+	}
+	// A SHARED_REALM object may declare its OWN realm in item.in (it becomes
+	// known once indexed), so allow its declared realm in addition to the above.
+	var selfRealm string
+	if item.Type == realm.TypeSharedRealm {
+		if r, _, perr := realm.ParseSharedRealm(item); perr == nil {
+			selfRealm = r
+		}
+	}
+	if selfRealm != "" && !realm.ValidateRealmsForPutSelf(realms, item.Pubkey, p.index.Resolver(), selfRealm) {
+		writeError(w, http.StatusBadRequest,
+			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
+			"INVALID_OBJECT")
+		return
+	}
+	// Enforce the full SHARED_REALM type contract (decision 4).
+	if item.Type == realm.TypeSharedRealm {
+		if _, _, err := realm.ParseSharedRealm(item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
+			return
+		}
 	}
 	if ref != item.Ref() {
 		writeError(w, http.StatusBadRequest,
@@ -775,7 +796,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	// Private object access check
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
-		if !realm.CanRead(meta.Realms, authPK, p.shared) {
+		if !realm.CanRead(meta.Realms, authPK, p.index.Resolver()) {
 			if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
 				pageRef := ref
 				if meta.HasPageRelation && meta.PageRef != "" {

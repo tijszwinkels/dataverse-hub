@@ -225,6 +225,9 @@ func (g *GraphSharedRealms) Load(items []*object.Item) {
 
 // Count returns the number of shared realms known from the graph.
 func (g *GraphSharedRealms) Count() int {
+	if g == nil {
+		return 0
+	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	return len(g.realms)
@@ -232,6 +235,9 @@ func (g *GraphSharedRealms) Count() int {
 
 // IsSharedRealm checks if the name is a known graph-shared realm.
 func (g *GraphSharedRealms) IsSharedRealm(name string) bool {
+	if g == nil {
+		return false
+	}
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	_, ok := g.realms[name]
@@ -240,7 +246,7 @@ func (g *GraphSharedRealms) IsSharedRealm(name string) bool {
 
 // IsMember checks if pubkey is a member of the given graph-shared realm.
 func (g *GraphSharedRealms) IsMember(realmName, pubkey string) bool {
-	if pubkey == "" {
+	if g == nil || pubkey == "" {
 		return false
 	}
 	g.mu.RLock()
@@ -259,7 +265,7 @@ func (g *GraphSharedRealms) IsMember(realmName, pubkey string) bool {
 
 // RealmsForPubkey returns all graph-shared realms the pubkey belongs to.
 func (g *GraphSharedRealms) RealmsForPubkey(pubkey string) []string {
-	if pubkey == "" {
+	if g == nil || pubkey == "" {
 		return nil
 	}
 	g.mu.RLock()
@@ -287,4 +293,15 @@ func (g *GraphSharedRealms) Members(realmName string) []string {
 	out := make([]string, len(e.members))
 	copy(out, e.members)
 	return out
+}
+
+// realmsKeys returns all known realm names. Used by Merged for union Count.
+func (g *GraphSharedRealms) realmsKeys() []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	keys := make([]string, 0, len(g.realms))
+	for k := range g.realms {
+		keys = append(keys, k)
+	}
+	return keys
 }

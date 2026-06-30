@@ -45,7 +45,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		if meta, found := h.index.GetMeta(resolved); found && !meta.IsPublic {
 			authPK := auth.AuthPubkey(r)
-			if !realm.CanRead(meta.Realms, authPK, h.shared) {
+			if !realm.CanRead(meta.Realms, authPK, h.index.Resolver()) {
 				servePrivatePageLogin(w)
 				return
 			}
@@ -123,7 +123,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// Private object access control: return 404 (not 403) to avoid leaking existence
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
-		if !realm.CanRead(meta.Realms, authPK, h.shared) {
+		if !realm.CanRead(meta.Realms, authPK, h.index.Resolver()) {
 			if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
 				pageRef := ref
 				if meta.HasPageRelation && meta.PageRef != "" {
@@ -282,12 +282,32 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
-	if !realm.ValidateRealmsForPut(realms, item.Pubkey, h.shared) {
+	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm.
+	// A SHARED_REALM object is additionally allowed to declare its OWN realm in
+	// item.in (that realm becomes known once this object is indexed), so we pass
+	// the object's declared realm as an extra accepted realm for that case.
+	var selfRealm string
+	if item.Type == realm.TypeSharedRealm {
+		if r, _, perr := realm.ParseSharedRealm(item); perr == nil {
+			selfRealm = r
+		}
+	}
+	if !realm.ValidateRealmsForPutSelf(realms, item.Pubkey, h.index.Resolver(), selfRealm) {
 		writeError(w, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
+	}
+
+	// Enforce the full SHARED_REALM type contract (decision 4): owner-prefixed
+	// realm, signer owns it, id == RealmID(realm). ParseSharedRealm above only
+	// extracted the realm for the self-declaration carve-out; re-validate fully
+	// and reject on any contract violation.
+	if item.Type == realm.TypeSharedRealm {
+		if _, _, err := realm.ParseSharedRealm(item); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
+			return
+		}
 	}
 
 	// Check ref matches

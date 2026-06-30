@@ -36,7 +36,18 @@ func HasMatchingRealm(realms []string, authPubkey string) bool {
 // ValidateRealmsForPut checks that at least one realm is acceptable for storage.
 // Accepts: "dataverse001", "server-public", a self-owned pubkey-realm (matches signerPubkey),
 // or a configured shared realm. Returns true if valid.
-func ValidateRealmsForPut(realms []string, signerPubkey string, shared *SharedRealms) bool {
+//
+// The resolver may be a *SharedRealms (TOML), *GraphSharedRealms (graph), a
+// *Merged (both), or nil.
+func ValidateRealmsForPut(realms []string, signerPubkey string, resolver RealmResolver) bool {
+	return ValidateRealmsForPutSelf(realms, signerPubkey, resolver, "")
+}
+
+// ValidateRealmsForPutSelf is like ValidateRealmsForPut but additionally
+// accepts selfRealm — the realm a SHARED_REALM object declares for itself. That
+// realm is not yet known to the resolver (the object defining it is the one
+// being stored), so it must be allowed explicitly. selfRealm may be "".
+func ValidateRealmsForPutSelf(realms []string, signerPubkey string, resolver RealmResolver, selfRealm string) bool {
 	for _, r := range realms {
 		if r == "dataverse001" || r == "server-public" {
 			return true
@@ -44,7 +55,10 @@ func ValidateRealmsForPut(realms []string, signerPubkey string, shared *SharedRe
 		if object.IsPubkeyRealm(r) && r == signerPubkey {
 			return true
 		}
-		if shared != nil && shared.IsSharedRealm(r) {
+		if resolver != nil && resolver.IsSharedRealm(r) {
+			return true
+		}
+		if selfRealm != "" && r == selfRealm {
 			return true
 		}
 	}
@@ -54,16 +68,19 @@ func ValidateRealmsForPut(realms []string, signerPubkey string, shared *SharedRe
 // CanRead checks if the given pubkey can read an object with these realms.
 // Public objects are always readable. Private objects require matching
 // pubkey-realm or shared-realm membership.
-func CanRead(realms []string, authPubkey string, shared *SharedRealms) bool {
+//
+// The resolver may be a *SharedRealms (TOML), *GraphSharedRealms (graph), a
+// *Merged (both), or nil.
+func CanRead(realms []string, authPubkey string, resolver RealmResolver) bool {
 	if IsPublicObject(realms) {
 		return true
 	}
 	if HasMatchingRealm(realms, authPubkey) {
 		return true
 	}
-	if authPubkey != "" && shared != nil {
+	if authPubkey != "" && resolver != nil {
 		for _, r := range realms {
-			if shared.IsMember(r, authPubkey) {
+			if resolver.IsMember(r, authPubkey) {
 				return true
 			}
 		}

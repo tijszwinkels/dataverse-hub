@@ -25,6 +25,9 @@ func (s *SharedRealms) Load(realms map[string][]string) {
 
 // IsSharedRealm checks if the name is a configured shared realm.
 func (s *SharedRealms) IsSharedRealm(name string) bool {
+	if s == nil {
+		return false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.realms[name]
@@ -33,7 +36,7 @@ func (s *SharedRealms) IsSharedRealm(name string) bool {
 
 // IsMember checks if pubkey is a member of the given realm.
 func (s *SharedRealms) IsMember(realmName, pubkey string) bool {
-	if pubkey == "" {
+	if s == nil || pubkey == "" {
 		return false
 	}
 	s.mu.RLock()
@@ -52,7 +55,7 @@ func (s *SharedRealms) IsMember(realmName, pubkey string) bool {
 
 // RealmsForPubkey returns all shared realms the pubkey belongs to.
 func (s *SharedRealms) RealmsForPubkey(pubkey string) []string {
-	if pubkey == "" {
+	if s == nil || pubkey == "" {
 		return nil
 	}
 	s.mu.RLock()
@@ -71,7 +74,24 @@ func (s *SharedRealms) RealmsForPubkey(pubkey string) []string {
 
 // Count returns the number of configured shared realms.
 func (s *SharedRealms) Count() int {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.realms)
+}
+
+// realmsKeys returns all configured realm names. Used by Merged for union Count.
+func (s *SharedRealms) realmsKeys() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0, len(s.realms))
+	for k := range s.realms {
+		keys = append(keys, k)
+	}
+	return keys
 }
