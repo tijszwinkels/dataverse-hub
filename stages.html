@@ -72,8 +72,8 @@
 <p class="lead">Graph-native shared realm access for the dataverse hub. Below is the full roadmap and exactly where we stand.</p>
 
 <div class="meter-wrap">
-  <div class="meter-track"><div class="meter-fill" style="width: 55%;"></div></div>
-  <div class="meter-labels"><span>Stage 1 — Design</span><span>~55% overall</span><span>Stage 5 — Docs &amp; release</span></div>
+  <div class="meter-track"><div class="meter-fill" style="width: 85%;"></div></div>
+  <div class="meter-labels"><span>Stage 1 — Design</span><span>~85% overall</span><span>Stage 5 — Docs &amp; release</span></div>
 </div>
 
 <div class="legend">
@@ -147,36 +147,35 @@
 
   <!-- Stage 4 -->
   <div class="stage">
-    <div class="stage-dot dot-current"></div>
-    <div class="stage-card current">
+    <div class="stage-dot dot-done"></div>
+    <div class="stage-card done">
       <div class="stage-head">
         <span class="stage-num">4</span>
         <span class="stage-title">Hub wiring — read gating, PUT validation, <code>/auth/realms</code></span>
-        <span class="badge badge-current">In progress</span>
+        <span class="badge badge-done">Complete</span>
       </div>
       <div class="stage-body">
-        <p>Switch the hub from TOML-only to graph-authoritative + TOML-override (decision 7). Touch points across the serving layer:</p>
+        <p>Wired the graph reader into the hub end-to-end. <code>realm.RealmResolver</code> interface + <code>Merged</code> (graph ∪ TOML) combiner; <code>storage.Index</code> ingests <code>SHARED_REALM</code> objects and exposes <code>Resolver()</code>; <code>CanRead</code> / <code>ValidateRealmsForPut</code> / <code>GET /auth/realms</code> consult the merged resolver; PUT enforces the full type contract. Integration tests cover PUT accept/reject, member read / non-member 404, revocation by edit, and <code>/auth/realms</code>.</p>
         <ul>
           <li><code>realm.CanRead</code> / <code>ValidateRealmsForPut</code> consult merged source (graph + TOML)</li>
           <li>PUT validation: reject <code>SHARED_REALM</code> unless <code>content.realm</code> owner-prefixed, signer owns it, <code>id == RealmID(realm)</code></li>
           <li><code>GET /auth/realms</code> lists realms the caller belongs to (graph + TOML)</li>
-          <li><code>main.go</code> SIGHUP reload merges graph + TOML</li>
-          <li>Proxy mode: resolve missing REALM objects from upstream</li>
-          <li>Integration tests against a running hub</li>
+          <li>TOML preserved as operator override; SIGHUP reload stays live via shared pointer</li>
+          <li>Integration tests against a running hub (6 tests)</li>
         </ul>
-        <div class="files">Planned: edits to <code>realm/realm.go</code> · <code>serving/handlers.go</code> · <code>serving/proxy.go</code> · <code>main.go</code> + new <code>shared_realms_graph_test.go</code></div>
+        <div class="files">Code: <code>realm/resolver.go</code> · edits to <code>realm/realm.go</code> <code>realm/shared.go</code> <code>realm/graph.go</code> <code>storage/index.go</code> <code>serving/handlers.go</code> <code>serving/hub.go</code> <code>serving/proxy.go</code> · tests <code>shared_realms_graph_test.go</code></div>
       </div>
     </div>
   </div>
 
   <!-- Stage 5 -->
   <div class="stage">
-    <div class="stage-dot dot-todo"></div>
-    <div class="stage-card todo">
+    <div class="stage-dot dot-current"></div>
+    <div class="stage-card current">
       <div class="stage-head">
         <span class="stage-num">5</span>
         <span class="stage-title">Docs &amp; spec — README, <code>hub.example.toml</code>, spec text</span>
-        <span class="badge badge-todo">Not started</span>
+        <span class="badge badge-current">In progress</span>
       </div>
       <div class="stage-body">
         <p>Document the new type for humans and agents, and align all reference docs.</p>
@@ -194,9 +193,9 @@
 </div>
 
 <h2>Where we are right now</h2>
-<p>Stages <strong>1</strong> (design), <strong>2</strong> (deterministic addressing layer) and <strong>3</strong> (graph membership reader) are <strong>complete and tested</strong>. We are now in <strong>Stage 4</strong>: wiring the graph reader into the hub's read path, PUT validation, and <code>/auth/realms</code>. Until Stage 4 lands, the existing TOML-based <code>SharedRealms</code> is still the only thing consulted by <code>realm.CanRead</code> and <code>ValidateRealmsForPut</code>.</p>
+<p>Stages <strong>1</strong>–<strong>4</strong> are <strong>complete and tested</strong>: design, deterministic addressing, graph membership reader, and full hub wiring (read gating, PUT validation, <code>/auth/realms</code>). The hub now decides shared-realm access from the graph with TOML as an operator override. We are in <strong>Stage 5</strong>: documentation and the self-describing spec text for <code>SHARED_REALM</code> objects.</p>
 
-<p><strong>Next action:</strong> merge graph + TOML into a single resolver consulted by <code>CanRead</code> / <code>ValidateRealmsForPut</code>, add PUT-time <code>SHARED_REALM</code> contract validation, and feed <code>GET /auth/realms</code> from both sources. Then index hook + proxy upstream resolution.</p>
+<p><strong>Next action:</strong> update README's "Shared realms" section for the graph-native format, add <code>hub.example.toml</code> override comments, and write the <code>item.instruction</code> text that makes a SHARED_REALM object self-describing.</p>
 
 <a class="cta" href="/design.html">View the full design page →</a>
 
