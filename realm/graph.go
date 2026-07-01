@@ -102,6 +102,15 @@ func ParseSharedRealm(item *object.Item) (realmName string, members []string, er
 		return "", nil, fmt.Errorf("item.id %q != RealmID(realm) %q", item.ID, wantID)
 	}
 
+	// Decision 6: SHARED_REALM objects must propagate globally, so they MUST
+	// include "dataverse001" in item.in. This keeps realm definitions discoverable
+	// by every hub and prevents locally-authoritative realms that other hubs
+	// never see. (A realm not in dataverse001 would be private to one hub and
+	// could not be resolved by the deterministic address from elsewhere.)
+	if !item.In.Contains("dataverse001") {
+		return "", nil, fmt.Errorf("SHARED_REALM object must include \"dataverse001\" in item.in (decision 6: global propagation)")
+	}
+
 	// Decision 2: extract member pubkeys from relations.member refs.
 	members = extractMemberPubkeys(item.Relations[RelationMember])
 

@@ -104,6 +104,17 @@ func TestParseSharedRealm_RejectsMissingContent(t *testing.T) {
 	}
 }
 
+func TestParseSharedRealm_RequiresDataverse001(t *testing.T) {
+	// Decision 6: SHARED_REALM objects must propagate globally via dataverse001.
+	item := sharedRealmItem(t, testPK, testPK+".AcmeTeam", []string{testPK2}, 1)
+	// Remove dataverse001 from item.in — only the owner identity realm remains.
+	item.In = object.InField{testPK}
+
+	if _, _, err := ParseSharedRealm(item); err == nil {
+		t.Error("expected error when dataverse001 is absent from item.in, got nil")
+	}
+}
+
 func TestParseSharedRealm_SkipsInvalidMemberRefs(t *testing.T) {
 	realmName := testPK + ".AcmeTeam"
 	item := sharedRealmItem(t, testPK, realmName, []string{testPK2}, 1)

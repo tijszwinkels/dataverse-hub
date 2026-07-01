@@ -283,26 +283,18 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm.
-	// A SHARED_REALM object is additionally allowed to declare its OWN realm in
-	// item.in (that realm becomes known once this object is indexed), so we pass
-	// the object's declared realm as an extra accepted realm for that case.
-	var selfRealm string
-	if item.Type == realm.TypeSharedRealm {
-		if r, _, perr := realm.ParseSharedRealm(item); perr == nil {
-			selfRealm = r
-		}
-	}
-	if !realm.ValidateRealmsForPutSelf(realms, item.Pubkey, h.index.Resolver(), selfRealm) {
+	// A valid SHARED_REALM always includes "dataverse001" in item.in (decision 6,
+	// enforced by ParseSharedRealm below), so it passes via the dataverse001 branch.
+	if !realm.ValidateRealmsForPut(realms, item.Pubkey, h.index.Resolver()) {
 		writeError(w, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
 	}
 
-	// Enforce the full SHARED_REALM type contract (decision 4): owner-prefixed
-	// realm, signer owns it, id == RealmID(realm). ParseSharedRealm above only
-	// extracted the realm for the self-declaration carve-out; re-validate fully
-	// and reject on any contract violation.
+	// Enforce the full SHARED_REALM type contract (decisions 3, 4, 6):
+	// owner-prefixed realm, signer owns it, id == RealmID(realm), and
+	// dataverse001 present in item.in.
 	if item.Type == realm.TypeSharedRealm {
 		if _, _, err := realm.ParseSharedRealm(item); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")

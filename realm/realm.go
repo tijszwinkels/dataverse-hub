@@ -39,15 +39,11 @@ func HasMatchingRealm(realms []string, authPubkey string) bool {
 //
 // The resolver may be a *SharedRealms (TOML), *GraphSharedRealms (graph), a
 // *Merged (both), or nil.
+//
+// SHARED_REALM objects are accepted via the "dataverse001" branch: decision 6
+// requires them to include dataverse001 in item.in, enforced by ParseSharedRealm
+// at the call site. No self-realm carve-out is needed.
 func ValidateRealmsForPut(realms []string, signerPubkey string, resolver RealmResolver) bool {
-	return ValidateRealmsForPutSelf(realms, signerPubkey, resolver, "")
-}
-
-// ValidateRealmsForPutSelf is like ValidateRealmsForPut but additionally
-// accepts selfRealm — the realm a SHARED_REALM object declares for itself. That
-// realm is not yet known to the resolver (the object defining it is the one
-// being stored), so it must be allowed explicitly. selfRealm may be "".
-func ValidateRealmsForPutSelf(realms []string, signerPubkey string, resolver RealmResolver, selfRealm string) bool {
 	for _, r := range realms {
 		if r == "dataverse001" || r == "server-public" {
 			return true
@@ -56,9 +52,6 @@ func ValidateRealmsForPutSelf(realms []string, signerPubkey string, resolver Rea
 			return true
 		}
 		if resolver != nil && resolver.IsSharedRealm(r) {
-			return true
-		}
-		if selfRealm != "" && r == selfRealm {
 			return true
 		}
 	}

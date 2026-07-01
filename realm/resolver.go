@@ -28,16 +28,16 @@ var (
 )
 
 // Merged combines a graph resolver (authoritative) with a TOML resolver
-// (override), implementing decision 7: graph is the source of truth, TOML is a
-// hub-operator kill-switch / local override on top.
+// (additive local override), implementing decision 7: graph is the source of
+// truth, TOML is a hub-operator supplement layered on top.
 //
-// Precedence semantics:
+// Precedence semantics (additive union, NOT deny-capable):
 //   - IsSharedRealm(R): true if EITHER source knows R.
-//   - IsMember(R, pk): true if EITHER source grants membership. This means TOML
-//     can ADD members the graph doesn't list (force-grant), and the graph's
-//     members still count. Revocation via TOML is handled by the hub operator
-//     simply not listing the realm / not forwarding — there is no per-member
-//     deny in the merged view (a deny-list was explicitly deferred, decision 5).
+//   - IsMember(R, pk): true if EITHER source grants membership. TOML can
+//     ADD members the graph doesn't list (force-grant), but it CANNOT revoke
+//     a graph-granted member — there is no per-member deny in this view.
+//     Revocation is done in the graph by editing members at a higher revision
+//     (decision 5); an explicit deny-list was deferred.
 //   - RealmsForPubkey(pk): union of both sources (deduped).
 //   - Count(): union count.
 //

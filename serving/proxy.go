@@ -280,28 +280,16 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm
+	// Object must belong to dataverse001, a self-owned pubkey-realm, or a configured shared realm.
+	// A valid SHARED_REALM always includes "dataverse001" in item.in (decision 6,
+	// enforced by ParseSharedRealm below), so it passes via the dataverse001 branch.
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.index.Resolver()) {
 		writeError(w, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
 	}
-	// A SHARED_REALM object may declare its OWN realm in item.in (it becomes
-	// known once indexed), so allow its declared realm in addition to the above.
-	var selfRealm string
-	if item.Type == realm.TypeSharedRealm {
-		if r, _, perr := realm.ParseSharedRealm(item); perr == nil {
-			selfRealm = r
-		}
-	}
-	if selfRealm != "" && !realm.ValidateRealmsForPutSelf(realms, item.Pubkey, p.index.Resolver(), selfRealm) {
-		writeError(w, http.StatusBadRequest,
-			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
-			"INVALID_OBJECT")
-		return
-	}
-	// Enforce the full SHARED_REALM type contract (decision 4).
+	// Enforce the full SHARED_REALM type contract (decisions 3, 4, 6).
 	if item.Type == realm.TypeSharedRealm {
 		if _, _, err := realm.ParseSharedRealm(item); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
