@@ -72,8 +72,8 @@
 <p class="lead">Graph-native shared realm access for the dataverse hub. Below is the full roadmap and exactly where we stand.</p>
 
 <div class="meter-wrap">
-  <div class="meter-track"><div class="meter-fill" style="width: 85%;"></div></div>
-  <div class="meter-labels"><span>Stage 1 — Design</span><span>~85% overall</span><span>Stage 5 — Docs &amp; release</span></div>
+  <div class="meter-track"><div class="meter-fill" style="width: 100%;"></div></div>
+  <div class="meter-labels"><span>Stage 1 — Design</span><span>100% — all stages complete</span><span>Stage 5 — Docs &amp; release</span></div>
 </div>
 
 <div class="legend">
@@ -170,22 +170,22 @@
 
   <!-- Stage 5 -->
   <div class="stage">
-    <div class="stage-dot dot-current"></div>
-    <div class="stage-card current">
+    <div class="stage-dot dot-done"></div>
+    <div class="stage-card done">
       <div class="stage-head">
         <span class="stage-num">5</span>
         <span class="stage-title">Docs &amp; spec — README, <code>hub.example.toml</code>, spec text</span>
-        <span class="badge badge-current">In progress</span>
+        <span class="badge badge-done">Complete</span>
       </div>
       <div class="stage-body">
-        <p>Document the new type for humans and agents, and align all reference docs.</p>
+        <p>Rewrote the README "Shared realms" section to make the graph-native <code>SHARED_REALM</code> format primary, with TOML as an additive local override. <code>hub.example.toml</code> updated to match. The README documents the full object shape (example id verified against <code>uuid_v5</code>), the PUT-enforced type contract, update/revocation via higher revision, deterministic access resolution, and TOML override semantics. The self-describing <code>item.instruction</code> text is included in the example object.</p>
         <ul>
-          <li>README "Shared realms" section: graph-native format + TOML override</li>
-          <li><code>hub.example.toml</code> comments on TOML-as-override</li>
-          <li><code>item.instruction</code> text for SHARED_REALM objects (self-describing)</li>
-          <li>Publish a canonical example SHARED_REALM object</li>
+          <li>README "Shared realms" section: graph-native format + TOML override ✓</li>
+          <li><code>hub.example.toml</code> comments on TOML-as-additive-override ✓</li>
+          <li><code>item.instruction</code> text for SHARED_REALM objects (self-describing) ✓</li>
+          <li>Canonical example SHARED_REALM object in README ✓</li>
         </ul>
-        <div class="files">Planned: <code>README.md</code> · <code>hub.example.toml</code></div>
+        <div class="files">Code: <code>README.md</code> · <code>hub.example.toml</code></div>
       </div>
     </div>
   </div>
@@ -193,9 +193,9 @@
 </div>
 
 <h2>Where we are right now</h2>
-<p>Stages <strong>1</strong>–<strong>4</strong> are <strong>complete and tested</strong>: design, deterministic addressing, graph membership reader, and full hub wiring (read gating, PUT validation, <code>/auth/realms</code>). The hub now decides shared-realm access from the graph with TOML as an operator override. We are in <strong>Stage 5</strong>: documentation and the self-describing spec text for <code>SHARED_REALM</code> objects.</p>
+<p>All five stages are <strong>complete</strong>: design, deterministic addressing, graph membership reader, full hub wiring, and documentation. The hub now decides shared-realm access from signed <code>SHARED_REALM</code> objects in the graph, with TOML as an additive operator override. PR <a href="https://github.com/tijszwinkels/dataverse-hub/pull/8">#8</a> is open for review.</p>
 
-<p><strong>Next action:</strong> update README's "Shared realms" section for the graph-native format, add <code>hub.example.toml</code> override comments, and write the <code>item.instruction</code> text that makes a SHARED_REALM object self-describing.</p>
+<p><strong>Done.</strong> Awaiting PR review/merge.</p>
 
 <a class="cta" href="/design.html">View the full design page →</a>
 
