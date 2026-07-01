@@ -45,8 +45,11 @@
 # DNS TXT record cache TTL for custom domain resolution
 # txt_cache_ttl = "5m"
 
-# Shared realms — grant a group of pubkeys shared read access to objects.
-# Realm names conventionally use "{owner-pubkey}.{Name}" but any string works.
+# Shared realms — additive TOML override granting a group of pubkeys shared read
+# access. Membership is primarily declared in the graph by SHARED_REALM objects
+# (see README "Shared realms"); this TOML block ADDS members the graph doesn't
+# list but CANNOT revoke a graph-granted member. Useful for emergency/local grants.
+# Realm names must be owner-prefixed: "{owner-pubkey}.{Name}".
 # Edit and send SIGHUP to reload without restart.
 #
 # [realms."AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.MyTeam"]
