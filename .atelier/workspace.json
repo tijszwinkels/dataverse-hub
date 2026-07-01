@@ -6,6 +6,7 @@
     "GOPATH": "/work/go"
   },
   "run": [
+    "apt-get update -qq && apt-get install -y -qq jq",
     "curl -sSL https://go.dev/dl/go1.24.13.linux-$(dpkg --print-architecture).tar.gz -o /tmp/go.tgz",
     "rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz",
     "/usr/local/go/bin/go version"
