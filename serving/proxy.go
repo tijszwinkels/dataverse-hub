@@ -8,11 +8,14 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/events"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -37,6 +40,21 @@ type Proxy struct {
 	// "all" — all objects are forwarded, including identity-realm and shared-realm.
 	UpstreamPush string
 
+	Events               *events.Log // nil = events disabled (/events → 404)
+	EventsMaxSubscribers int         // 0 = default (256)
+	// EventsPrefetch: eagerly fetch upstream event refs not in the local
+	// cache (mirror-ish). Default false: pass events through skinny and keep
+	// cache-on-demand semantics.
+	EventsPrefetch bool
+	eventSubs      atomic.Int64
+
+	// forwarding tracks PUTs currently in flight to upstream (ref → revision).
+	// The upstream journals a forwarded PUT before our handler regains control
+	// to cache it locally, so the echo event can beat the index update; this
+	// map closes that window for echo suppression in ApplyUpstreamEvent.
+	forwardingMu sync.Mutex
+	forwarding   map[string]int
+
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
 }
@@ -53,6 +71,7 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 		upstream:         up,
 		pending:          pending,
 		shared:           shared,
+		forwarding:       make(map[string]int),
 	}
 }
 
@@ -84,11 +103,19 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
+	r.Get("/events", p.handleEvents)
 	r.Get("/{ref}", p.handleGetObject)
 	r.Put("/{ref}", p.handlePutObject)
 	r.Get("/{ref}/inbound", p.handleInbound)
 
 	return r
+}
+
+// handleEvents serves the change feed from the proxy's own journal: local
+// writes plus upstream changes it has applied or passed through. Cursors are
+// this hub's — never upstream's. Uses the same merged realm resolver as GET.
+func (p *Proxy) handleEvents(w http.ResponseWriter, r *http.Request) {
+	serveEvents(w, r, p.Events, p.index.Resolver(), p.auth, &p.eventSubs, p.EventsMaxSubscribers)
 }
 
 // handleRoot serves GET / with vhost-aware routing.
@@ -323,7 +350,13 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Forward to upstream
+	// Forward to upstream. Mark the forward first: upstream will journal this
+	// PUT (and echo it down our events subscription) before we get to cache
+	// it locally — the mark lets ApplyUpstreamEvent suppress that echo.
+	// The deferred unmark runs after the local cache+index update below.
+	p.markForwarding(ref, item.Revision)
+	defer p.unmarkForwarding(ref)
+
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: build request: %v", ref, err)
@@ -357,6 +390,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		if p.Vhost != nil && item.Type == "PAGE" {
 			p.Vhost.AddPage(ref)
 		}
+		emitPut(p.Events, item, realms)
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 		w.WriteHeader(resp.StatusCode)
@@ -645,11 +679,12 @@ func extractSortKey(raw json.RawMessage) (time.Time, string) {
 // cacheLocally stores an object in the local store and updates the index.
 // Refuses to downgrade: if local has a newer revision, pushes local to upstream instead.
 func (p *Proxy) CacheLocally(ref string, data []byte) {
-	_, item, err := object.ParseEnvelope(data)
+	env, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		log.Printf("[proxy] WARN: cache %s: parse: %v", ref, err)
 		return
 	}
+	realms := object.ResolveIn(env, item)
 
 	if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
 		if existingMeta.Revision > item.Revision {
@@ -674,11 +709,12 @@ func (p *Proxy) CacheLocally(ref string, data []byte) {
 		log.Printf("[proxy] WARN: cache %s: write: %v", ref, err)
 		return
 	}
-	p.index.Update(ref, item, ts)
+	p.index.Update(ref, item, ts, realms)
 	// Update vhost hash map for PAGE objects
 	if p.Vhost != nil && item.Type == "PAGE" {
 		p.Vhost.AddPage(ref)
 	}
+	emitPut(p.Events, item, realms)
 	log.Printf("[proxy] cached %s rev %d (%s)", ref, item.Revision, item.Type)
 }
 
@@ -988,6 +1024,7 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 	if p.Vhost != nil && item.Type == "PAGE" {
 		p.Vhost.AddPage(ref)
 	}
+	emitPut(p.Events, item, realms)
 	log.Printf("stored %s rev %d (%s) [private, local-only]", ref, item.Revision, item.Type)
 
 	w.WriteHeader(http.StatusCreated)
@@ -1036,6 +1073,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 	if p.Vhost != nil && item.Type == "PAGE" {
 		p.Vhost.AddPage(ref)
 	}
+	emitPut(p.Events, item, realms)
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending
@@ -1141,4 +1179,87 @@ func (p *Proxy) cacheUpstreamListRefs(body []byte) {
 // encodeBase64Cursor encodes cursor bytes as base64url.
 func encodeBase64Cursor(data []byte) string {
 	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+// ApplyUpstreamEvent applies one change notification from the upstream
+// subscription. Re-sequencing per hop: whatever this does to the local store
+// or journal gets a LOCAL cursor — upstream cursors never reach downstream.
+// Idempotent by (ref, revision); duplicates and echoes of our own forwarded
+// PUTs are suppressed by the revision comparison.
+func (p *Proxy) ApplyUpstreamEvent(ev events.Event) {
+	if ev.Op != "put" {
+		return // forward compat: ignore ops we don't know (e.g. future deletes)
+	}
+
+	if rev, inFlight := p.forwardingRevision(ev.Ref); inFlight && rev >= ev.Revision {
+		return // echo of a PUT we are forwarding right now
+	}
+
+	if meta, cached := p.index.GetMeta(ev.Ref); cached {
+		if meta.Revision >= ev.Revision {
+			return // echo of our own push, or an already-applied duplicate
+		}
+		p.ensureFresh(ev.Ref) // conditional GET → CacheLocally → local journal
+		if m, ok := p.index.GetMeta(ev.Ref); ok && m.Revision >= ev.Revision {
+			return // fetched and journaled via CacheLocally
+		}
+		// Fetch failed (upstream flaked mid-stream): fall through to the
+		// skinny pass-through so downstream still hears about the change.
+	} else if p.EventsPrefetch {
+		p.ensureFresh(ev.Ref)
+		if _, ok := p.index.GetMeta(ev.Ref); ok {
+			return // cached and journaled via CacheLocally
+		}
+	}
+
+	// Not (or not successfully) cached: pass the notification through.
+	// Consumers fetch through us on demand, exactly like today.
+	p.Events.Record(events.Event{
+		Op:       ev.Op,
+		Ref:      ev.Ref,
+		Revision: ev.Revision,
+		Type:     ev.Type,
+		Pubkey:   ev.Pubkey,
+		Realms:   ev.Realms,
+	})
+}
+
+func (p *Proxy) markForwarding(ref string, revision int) {
+	p.forwardingMu.Lock()
+	defer p.forwardingMu.Unlock()
+	p.forwarding[ref] = revision
+}
+
+func (p *Proxy) unmarkForwarding(ref string) {
+	p.forwardingMu.Lock()
+	defer p.forwardingMu.Unlock()
+	delete(p.forwarding, ref)
+}
+
+func (p *Proxy) forwardingRevision(ref string) (int, bool) {
+	p.forwardingMu.Lock()
+	defer p.forwardingMu.Unlock()
+	rev, ok := p.forwarding[ref]
+	return rev, ok
+}
+
+// RevalidateAgainstUpstream re-checks every locally cached global object with
+// a conditional GET. Runs when the upstream cannot honor our events cursor
+// (its journal was lost or our cursor aged out): anything that changed in the
+// gap is re-fetched by ensureFresh and journaled by CacheLocally, so
+// DOWNSTREAM subscribers' cursors survive an upstream reset untouched.
+// Bounded by local cache size, not upstream size — the proxy is a partial
+// replica and revalidates only what it holds.
+func (p *Proxy) RevalidateAgainstUpstream() {
+	metas := p.index.GetAll("", "", "", false)
+	checked := 0
+	for _, m := range metas {
+		if !realm.IsGlobalObject(m.Realms) {
+			continue // local-only objects (private, server-public) have no upstream truth
+		}
+		p.ensureFresh(m.Ref)
+		checked++
+		time.Sleep(50 * time.Millisecond) // stay gentle with upstream's rate limit
+	}
+	log.Printf("[proxy] events: revalidated %d cached objects after upstream reset", checked)
 }

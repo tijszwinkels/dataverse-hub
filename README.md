@@ -116,6 +116,37 @@ Query parameters for list endpoints:
 PUT /{ref}              # upsert a signed object (signature verified server-side)
 ```
 
+### Events (change feed)
+
+```
+GET /events                          # SSE stream (Accept: text/event-stream)
+GET /events?since={cursor}&limit=N   # JSON replay page
+GET /events?since={cursor}&wait=30s  # long-poll variant
+```
+
+Streams change notifications so consumers stop polling. Events are skinny —
+`{cursor, op, ref, revision, type, pubkey, realms, received_at}` — fetch the
+object via `GET /{ref}` (conditional requests recommended). Delivery is
+at-least-once; deduplicate by `(ref, revision)`.
+
+- **Cursors** (`epoch:seq`) are per-hub and opaque. Resume with `?since=` or
+  the SSE `Last-Event-ID` header. Without `since`, SSE starts live at the
+  head; the JSON variant returns the head cursor for bootstrapping (fetch it
+  *before* your initial sync, then subscribe from it).
+- **Reset**: if a cursor can't be honored (journal loss, aged out of the
+  retention window) the stream sends `event: reset` with a fresh cursor (JSON:
+  `"reset": true`). Revalidate what you track, then resume from that cursor.
+- **Auth**: subscribers only receive events for objects they could `GET` —
+  same realm rules, evaluated per event. Optional server-side filters:
+  `type=`, `by=`, `realm=`.
+- **Federation**: a proxy-mode hub subscribes to its upstream's feed and
+  re-emits into its own journal under its own cursors, so an upstream restart
+  or journal loss never invalidates downstream subscribers (the proxy absorbs
+  it with a cache revalidation sweep).
+- **Feature detection**: older hubs return 404 — fall back to polling.
+
+Design: `specs/20260707-hub-events-stream/design.md`.
+
 ### Authentication
 
 ECDSA challenge-response auth. Proves ownership of a P-256 keypair without revealing the private key.

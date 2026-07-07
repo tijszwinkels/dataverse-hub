@@ -246,6 +246,15 @@ func AuthPubkey(r *http.Request) string {
 	return v
 }
 
+// RequestToken returns the raw bearer or cookie token from the request, ""
+// if none. Used by long-lived handlers (SSE) to revalidate mid-stream.
+func RequestToken(r *http.Request) string {
+	if t := extractBearerToken(r); t != "" {
+		return t
+	}
+	return extractCookieToken(r)
+}
+
 // extractBearerToken pulls the token from the Authorization header.
 func extractBearerToken(r *http.Request) string {
 	a := r.Header.Get("Authorization")

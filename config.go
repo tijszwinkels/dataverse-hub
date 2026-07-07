@@ -28,6 +28,12 @@ type Config struct {
 	BaseDomain  string        // e.g. "dataverse001.net", required for "redirect" and "isolate"
 	VhostMode   string        // "off", "redirect", or "isolate"
 	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
+
+	EventsEnabled        bool          // serve GET /events + journal writes (default: true)
+	EventsRetention      time.Duration // journal replay window (default: 168h)
+	EventsMaxSubscribers int           // concurrent SSE subscribers (default: 256)
+	EventsUpstream       bool          // proxy mode: subscribe to upstream /events (default: true)
+	EventsPrefetch       bool          // proxy mode: eager-fetch event refs not in cache (default: false)
 }
 
 // fileConfig mirrors Config but with pointer fields so we can distinguish
@@ -47,6 +53,12 @@ type fileConfig struct {
 	VhostMode        *string `toml:"vhost_mode"`
 	TxtCacheTTL      *string `toml:"txt_cache_ttl"`
 
+	EventsEnabled        *bool   `toml:"events_enabled"`
+	EventsRetention      *string `toml:"events_retention"`
+	EventsMaxSubscribers *int    `toml:"events_max_subscribers"`
+	EventsUpstream       *bool   `toml:"events_upstream"`
+	EventsPrefetch       *bool   `toml:"events_prefetch"`
+
 	Realms map[string]realmConfig `toml:"realms"`
 }
 
@@ -55,14 +67,9 @@ type realmConfig struct {
 	Members []string `toml:"members"`
 }
 
-// loadConfig builds the final Config by layering: defaults < TOML file < env vars.
-// Returns the config and the config file path (empty if none provided).
-func loadConfig() (Config, string) {
-	configPath := flag.String("config", "", "path to TOML config file")
-	flag.Parse()
-
-	// 1. Defaults
-	cfg := Config{
+// defaultConfig returns the built-in defaults (layer 1 of loadConfig).
+func defaultConfig() Config {
+	return Config{
 		Mode:             "proxy",
 		UpstreamURL:      "https://dataverse001.net",
 		UpstreamPush:     "public",
@@ -76,7 +83,23 @@ func loadConfig() (Config, string) {
 		BaseDomain:       "localhost",
 		VhostMode:        "isolate",
 		TxtCacheTTL:      5 * time.Minute,
+
+		EventsEnabled:        true,
+		EventsRetention:      168 * time.Hour, // replay window, design §5.2
+		EventsMaxSubscribers: 256,
+		EventsUpstream:       true,
+		EventsPrefetch:       false, // cache-on-demand stays the default
 	}
+}
+
+// loadConfig builds the final Config by layering: defaults < TOML file < env vars.
+// Returns the config and the config file path (empty if none provided).
+func loadConfig() (Config, string) {
+	configPath := flag.String("config", "", "path to TOML config file")
+	flag.Parse()
+
+	// 1. Defaults
+	cfg := defaultConfig()
 
 	// 2. TOML file (if provided)
 	if *configPath != "" {
@@ -165,6 +188,25 @@ func applyFile(cfg *Config, path string) error {
 			log.Printf("WARN: invalid txt_cache_ttl=%q, keeping %v", *fc.TxtCacheTTL, cfg.TxtCacheTTL)
 		}
 	}
+	if fc.EventsEnabled != nil {
+		cfg.EventsEnabled = *fc.EventsEnabled
+	}
+	if fc.EventsRetention != nil {
+		if d, err := time.ParseDuration(*fc.EventsRetention); err == nil {
+			cfg.EventsRetention = d
+		} else {
+			log.Printf("WARN: invalid events_retention=%q, keeping %v", *fc.EventsRetention, cfg.EventsRetention)
+		}
+	}
+	if fc.EventsMaxSubscribers != nil {
+		cfg.EventsMaxSubscribers = *fc.EventsMaxSubscribers
+	}
+	if fc.EventsUpstream != nil {
+		cfg.EventsUpstream = *fc.EventsUpstream
+	}
+	if fc.EventsPrefetch != nil {
+		cfg.EventsPrefetch = *fc.EventsPrefetch
+	}
 
 	return nil
 }
@@ -224,6 +266,29 @@ func applyEnv(cfg *Config) {
 		} else {
 			log.Printf("WARN: invalid HUB_TXT_CACHE_TTL=%q, keeping %v", v, cfg.TxtCacheTTL)
 		}
+	}
+	if v := os.Getenv("HUB_EVENTS_ENABLED"); v != "" {
+		cfg.EventsEnabled = v == "true"
+	}
+	if v := os.Getenv("HUB_EVENTS_RETENTION"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			cfg.EventsRetention = d
+		} else {
+			log.Printf("WARN: invalid HUB_EVENTS_RETENTION=%q, keeping %v", v, cfg.EventsRetention)
+		}
+	}
+	if v := os.Getenv("HUB_EVENTS_MAX_SUBSCRIBERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.EventsMaxSubscribers = n
+		} else {
+			log.Printf("WARN: invalid HUB_EVENTS_MAX_SUBSCRIBERS=%q, keeping %d", v, cfg.EventsMaxSubscribers)
+		}
+	}
+	if v := os.Getenv("HUB_EVENTS_UPSTREAM"); v != "" {
+		cfg.EventsUpstream = v == "true"
+	}
+	if v := os.Getenv("HUB_EVENTS_PREFETCH"); v != "" {
+		cfg.EventsPrefetch = v == "true"
 	}
 
 	switch cfg.VhostMode {

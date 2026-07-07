@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/events"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -75,8 +76,21 @@ func main() {
 	defer authStore.Stop()
 	log.Printf("Auth enabled (token expiry: %v)", cfg.AuthTokenExpiry)
 
+	// Events journal (change feed). Disabled → nil log → /events serves 404.
+	var elog *events.Log
+	if cfg.EventsEnabled {
+		var err error
+		elog, err = events.Open(filepath.Join(cfg.StoreDir, "events"), events.Options{Retention: cfg.EventsRetention})
+		if err != nil {
+			log.Fatalf("Failed to open events journal: %v", err)
+		}
+		log.Printf("Events enabled (retention: %v, max subscribers: %d)", cfg.EventsRetention, cfg.EventsMaxSubscribers)
+	} else {
+		log.Printf("Events disabled (events_enabled = false)")
+	}
+
 	var handler http.Handler
-	var proxyCleanup []func() // cleanup functions for proxy mode
+	var cleanup []func() // shutdown hooks, run in order before srv.Shutdown
 
 	switch cfg.Mode {
 	case "root":
@@ -84,6 +98,8 @@ func main() {
 		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef, shared)
 		hub.Vhost = resolver
 		hub.VhostMode = cfg.VhostMode
+		hub.Events = elog
+		hub.EventsMaxSubscribers = cfg.EventsMaxSubscribers
 		handler = hub.Router()
 
 	default: // "proxy" is the default
@@ -98,18 +114,45 @@ func main() {
 		}
 
 		up.StartHealthChecker(30 * time.Second)
-		proxyCleanup = append(proxyCleanup, up.Stop)
+		cleanup = append(cleanup, up.Stop)
 
 		pendingDir := filepath.Join(cfg.StoreDir, "sync_pending")
 		pending := upstream.NewSyncPending(pendingDir, up, store, index)
+		pending.Events = elog
 		pending.Start()
-		proxyCleanup = append(proxyCleanup, pending.Stop)
+		cleanup = append(cleanup, pending.Stop)
 
 		proxy := serving.NewProxy(store, index, limiter, authStore, cfg.DefaultViewerRef, up, pending, shared)
 		proxy.UpstreamPush = cfg.UpstreamPush
 		proxy.Vhost = resolver
 		proxy.VhostMode = cfg.VhostMode
+		proxy.Events = elog
+		proxy.EventsMaxSubscribers = cfg.EventsMaxSubscribers
+		proxy.EventsPrefetch = cfg.EventsPrefetch
 		handler = proxy.Router()
+
+		// Subscribe to the upstream change feed: apply/pass-through events
+		// into our own journal, revalidate the cache on upstream resets.
+		if elog != nil && cfg.EventsUpstream {
+			sub := upstream.NewSubscriber(
+				cfg.UpstreamURL,
+				filepath.Join(cfg.StoreDir, "events", "upstream-cursor.json"),
+				up,
+				upstream.SubscriberCallbacks{
+					OnEvent: proxy.ApplyUpstreamEvent,
+					OnReset: proxy.RevalidateAgainstUpstream,
+				},
+			)
+			sub.Start()
+			cleanup = append(cleanup, sub.Stop)
+			log.Printf("Events: subscribed to upstream %s/events (prefetch: %v)", cfg.UpstreamURL, cfg.EventsPrefetch)
+		}
+	}
+
+	// Close the journal before srv.Shutdown: closing ends all subscriptions,
+	// which makes long-lived SSE handlers return, which lets Shutdown drain.
+	if elog != nil {
+		cleanup = append(cleanup, func() { elog.Close() })
 	}
 
 	srv := &http.Server{
@@ -152,7 +195,7 @@ func main() {
 		sig := <-sigCh
 		log.Printf("Received %v, shutting down...", sig)
 
-		for _, fn := range proxyCleanup {
+		for _, fn := range cleanup {
 			fn()
 		}
 

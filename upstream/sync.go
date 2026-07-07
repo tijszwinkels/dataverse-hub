@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tijszwinkels/dataverse-hub/events"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 )
@@ -23,6 +24,10 @@ type SyncPending struct {
 	upstream *Client
 	store    *storage.Store
 	index    *storage.Index
+
+	// Events, when set, records a change event for objects cached via
+	// fetchAndCache (the 409-conflict path also mutates the store).
+	Events *events.Log
 
 	stop chan struct{}
 	wg   sync.WaitGroup
@@ -260,11 +265,12 @@ func (sp *SyncPending) fetchAndCache(ref string) {
 		return
 	}
 
-	_, item, err := object.ParseEnvelope(data)
+	env, item, err := object.ParseEnvelope(data)
 	if err != nil {
 		log.Printf("[proxy] WARN: sync fetch parse %s: %v", ref, err)
 		return
 	}
+	realms := object.ResolveIn(env, item)
 
 	ts, _ := item.Timestamp()
 	if err := sp.store.Write(ref, data, ts); err != nil {
@@ -272,8 +278,16 @@ func (sp *SyncPending) fetchAndCache(ref string) {
 		return
 	}
 	if sp.index != nil {
-		sp.index.Update(ref, item, ts)
+		sp.index.Update(ref, item, ts, realms)
 	}
+	sp.Events.Record(events.Event{
+		Op:       "put",
+		Ref:      ref,
+		Revision: item.Revision,
+		Type:     item.Type,
+		Pubkey:   item.Pubkey,
+		Realms:   []string(realms),
+	})
 	log.Printf("[proxy] sync: fetched newer %s from upstream", ref)
 }
 

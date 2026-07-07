@@ -362,6 +362,8 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		h.Vhost.AddPage(ref)
 	}
 
+	emitPut(h.Events, item, realms)
+
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
 	if isUpdate {
