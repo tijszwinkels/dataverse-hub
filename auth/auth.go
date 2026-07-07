@@ -180,14 +180,25 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 // Invalidates the token (from bearer header or cookie) and clears the session cookie.
 // Always returns 200 — logout is idempotent.
 func (a *AuthStore) HandleLogout(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token == "" {
-		token = extractCookieToken(r)
+	a.LogoutAndClearCookie(w, r)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// LogoutAndClearCookie invalidates the session token and clears the cookie
+// without writing a response body. Callers can write their own response after.
+func (a *AuthStore) LogoutAndClearCookie(w http.ResponseWriter, r *http.Request) {
+	// Invalidate bearer token if present
+	if bt := extractBearerToken(r); bt != "" {
+		a.mu.Lock()
+		delete(a.tokens, bt)
+		a.mu.Unlock()
 	}
 
-	if token != "" {
+	// Invalidate all dv_session cookie tokens (may be duplicates)
+	for _, ct := range extractCookieTokens(r) {
 		a.mu.Lock()
-		delete(a.tokens, token)
+		delete(a.tokens, ct)
 		a.mu.Unlock()
 	}
 
@@ -201,9 +212,6 @@ func (a *AuthStore) HandleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // ValidateToken returns the pubkey associated with a valid token, or ("", false).
@@ -223,13 +231,20 @@ func (a *AuthStore) ValidateToken(token string) (string, bool) {
 func (a *AuthStore) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := extractBearerToken(r)
-		if token == "" {
-			token = extractCookieToken(r)
-		}
 		if token != "" {
 			if pubkey, ok := a.ValidateToken(token); ok {
 				ctx := context.WithValue(r.Context(), authPubkeyKey, pubkey)
 				r = r.WithContext(ctx)
+			}
+		} else {
+			// Try all dv_session cookies — browsers may send duplicates
+			// when a stale cookie coexists with a fresh one after login.
+			for _, ct := range extractCookieTokens(r) {
+				if pubkey, ok := a.ValidateToken(ct); ok {
+					ctx := context.WithValue(r.Context(), authPubkeyKey, pubkey)
+					r = r.WithContext(ctx)
+					break
+				}
 			}
 		}
 		next.ServeHTTP(w, r)
@@ -255,13 +270,16 @@ func extractBearerToken(r *http.Request) string {
 	return strings.TrimPrefix(a, "Bearer ")
 }
 
-// extractCookieToken pulls the token from the dv_session cookie.
-func extractCookieToken(r *http.Request) string {
-	c, err := r.Cookie("dv_session")
-	if err != nil {
-		return ""
+// extractCookieTokens returns all dv_session cookie values (browsers may send
+// duplicates when a stale cookie coexists with a fresh one).
+func extractCookieTokens(r *http.Request) []string {
+	var tokens []string
+	for _, c := range r.Cookies() {
+		if c.Name == "dv_session" && c.Value != "" {
+			tokens = append(tokens, c.Value)
+		}
 	}
-	return c.Value
+	return tokens
 }
 
 func (a *AuthStore) cleanupLoop() {
