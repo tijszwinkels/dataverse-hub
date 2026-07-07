@@ -54,3 +54,23 @@
 #   "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ",
 #   "BzxY7_other_pubkey_here",
 # ]
+
+# ── Events (change feed) ─────────────────────────────────────────────
+# GET /events streams change notifications (SSE) and serves cursor-based
+# replay (?since=...). Disabling makes /events return 404 (like older hubs).
+# events_enabled = true
+
+# How long the journal keeps events for replay. Cursors older than this
+# receive a `reset` and must revalidate.
+# events_retention = "168h"
+
+# Concurrent SSE subscribers before new connects get 503 + Retry-After.
+# events_max_subscribers = 256
+
+# Proxy mode: subscribe to the upstream hub's /events feed and re-emit
+# changes into this hub's own journal (with this hub's cursors).
+# events_upstream = true
+
+# Proxy mode: eagerly fetch objects referenced by upstream events even if
+# never requested locally (false keeps cache-on-demand behavior).
+# events_prefetch = false

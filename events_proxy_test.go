@@ -88,7 +88,7 @@ func (c *eventsChain) startSubscriber(t *testing.T) {
 	c.sub = upstream.NewSubscriber(
 		c.rootSrv.URL,
 		filepath.Join(c.proxyDir, "events", "upstream-cursor.json"),
-		c.up.Available,
+		c.up,
 		upstream.SubscriberCallbacks{
 			OnEvent: c.proxy.ApplyUpstreamEvent,
 			OnReset: c.proxy.RevalidateAgainstUpstream,

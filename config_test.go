@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestApplyFile(t *testing.T) {
@@ -195,5 +196,86 @@ func TestUpstreamPushInvalidFallsBackToPublic(t *testing.T) {
 
 	if cfg.UpstreamPush != "public" {
 		t.Errorf("UpstreamPush = %q, want %q (fallback from invalid)", cfg.UpstreamPush, "public")
+	}
+}
+
+func TestEventsConfigFromFile(t *testing.T) {
+	tomlContent := `
+events_enabled = false
+events_retention = "48h"
+events_max_subscribers = 32
+events_upstream = false
+events_prefetch = true
+`
+	path := filepath.Join(t.TempDir(), "hub.toml")
+	if err := os.WriteFile(path, []byte(tomlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := Config{
+		EventsEnabled:        true,
+		EventsRetention:      168 * time.Hour,
+		EventsMaxSubscribers: 256,
+		EventsUpstream:       true,
+	}
+	if err := applyFile(&cfg, path); err != nil {
+		t.Fatalf("applyFile: %v", err)
+	}
+
+	if cfg.EventsEnabled {
+		t.Errorf("EventsEnabled = true, want false")
+	}
+	if cfg.EventsRetention != 48*time.Hour {
+		t.Errorf("EventsRetention = %v, want 48h", cfg.EventsRetention)
+	}
+	if cfg.EventsMaxSubscribers != 32 {
+		t.Errorf("EventsMaxSubscribers = %d, want 32", cfg.EventsMaxSubscribers)
+	}
+	if cfg.EventsUpstream {
+		t.Errorf("EventsUpstream = true, want false")
+	}
+	if !cfg.EventsPrefetch {
+		t.Errorf("EventsPrefetch = false, want true")
+	}
+}
+
+func TestEventsConfigFromEnv(t *testing.T) {
+	cfg := Config{EventsEnabled: true, EventsRetention: 168 * time.Hour, EventsMaxSubscribers: 256, EventsUpstream: true}
+	t.Setenv("HUB_EVENTS_ENABLED", "false")
+	t.Setenv("HUB_EVENTS_RETENTION", "24h")
+	t.Setenv("HUB_EVENTS_MAX_SUBSCRIBERS", "64")
+	t.Setenv("HUB_EVENTS_UPSTREAM", "false")
+	t.Setenv("HUB_EVENTS_PREFETCH", "true")
+	applyEnv(&cfg)
+
+	if cfg.EventsEnabled || cfg.EventsUpstream || !cfg.EventsPrefetch {
+		t.Errorf("bool envs not applied: %+v", cfg)
+	}
+	if cfg.EventsRetention != 24*time.Hour {
+		t.Errorf("EventsRetention = %v, want 24h", cfg.EventsRetention)
+	}
+	if cfg.EventsMaxSubscribers != 64 {
+		t.Errorf("EventsMaxSubscribers = %d, want 64", cfg.EventsMaxSubscribers)
+	}
+}
+
+func TestEventsConfigDefaults(t *testing.T) {
+	// Defaults come from loadConfig's literal; assert the documented values
+	// so a silent default change fails a test.
+	cfg := defaultConfig()
+	if !cfg.EventsEnabled {
+		t.Errorf("events must be enabled by default")
+	}
+	if cfg.EventsRetention != 168*time.Hour {
+		t.Errorf("EventsRetention default = %v, want 168h", cfg.EventsRetention)
+	}
+	if cfg.EventsMaxSubscribers != 256 {
+		t.Errorf("EventsMaxSubscribers default = %d, want 256", cfg.EventsMaxSubscribers)
+	}
+	if !cfg.EventsUpstream {
+		t.Errorf("EventsUpstream must default to true")
+	}
+	if cfg.EventsPrefetch {
+		t.Errorf("EventsPrefetch must default to false (cache-on-demand)")
 	}
 }

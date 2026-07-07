@@ -46,7 +46,7 @@ type SubscriberCallbacks struct {
 type Subscriber struct {
 	baseURL    string
 	cursorPath string
-	avail      func() bool // upstream availability gate (Client.Available)
+	upstream   *Client // availability gate + active probe while down (may be nil)
 	cb         SubscriberCallbacks
 	client     *http.Client
 
@@ -56,13 +56,16 @@ type Subscriber struct {
 }
 
 // NewSubscriber creates a subscriber for baseURL's /events feed, persisting
-// its resume cursor at cursorPath.
-func NewSubscriber(baseURL, cursorPath string, avail func() bool, cb SubscriberCallbacks) *Subscriber {
+// its resume cursor at cursorPath. upstream (optional) gates connection
+// attempts on availability; while down, the subscriber probes it actively —
+// waiting for the 30s background health-checker alone would leave the feed
+// disconnected long after the upstream is back.
+func NewSubscriber(baseURL, cursorPath string, upstream *Client, cb SubscriberCallbacks) *Subscriber {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Subscriber{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		cursorPath: cursorPath,
-		avail:      avail,
+		upstream:   upstream,
 		cb:         cb,
 		// No overall client timeout: the stream is long-lived by design.
 		// Dial and response-header timeouts still bound a dead upstream.
@@ -96,11 +99,14 @@ func (s *Subscriber) run() {
 		if s.ctx.Err() != nil {
 			return
 		}
-		if s.avail != nil && !s.avail() {
-			if !s.sleep(5 * time.Second) {
-				return
+		if s.upstream != nil && !s.upstream.Available() {
+			s.upstream.HealthCheck() // probe: don't wait for the 30s checker
+			if !s.upstream.Available() {
+				if !s.sleep(5 * time.Second) {
+					return
+				}
+				continue
 			}
-			continue
 		}
 
 		start := time.Now()
