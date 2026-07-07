@@ -86,6 +86,9 @@ func testProxyWithRealUpstream(t *testing.T) (proxy *httptest.Server, upstreamSr
 
 	cleanup = func() {
 		proxy.Close()
+		// Drain fire-and-forget goroutines (background caching/pushes)
+		// before TempDir cleanup deletes the store they write into.
+		p.WaitBackground()
 		upstreamSrv.Close()
 		upstreamLimiter.Stop()
 		upstreamAuth.Stop()

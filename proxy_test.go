@@ -53,6 +53,9 @@ func testRootAndProxy(t *testing.T) (*httptest.Server, *httptest.Server, func())
 
 	return proxySrv, rootSrv, func() {
 		proxySrv.Close()
+		// Drain fire-and-forget goroutines (background caching/pushes)
+		// before TempDir cleanup deletes the store they write into.
+		proxy.WaitBackground()
 		rootSrv.Close()
 		rootLimiter.Stop()
 		proxyLimiter.Stop()

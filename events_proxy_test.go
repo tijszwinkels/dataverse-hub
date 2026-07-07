@@ -74,6 +74,8 @@ func newEventsChain(t *testing.T) *eventsChain {
 		c.proxyLog.Close()
 		c.rootSrv.Close()
 		c.proxySrv.Close()
+		// Drain fire-and-forget goroutines before TempDir cleanup.
+		c.proxy.WaitBackground()
 		rootLimiter.Stop()
 		proxyLimiter.Stop()
 		rootAuth.Stop()

@@ -55,6 +55,10 @@ type Proxy struct {
 	forwardingMu sync.Mutex
 	forwarding   map[string]int
 
+	// bg tracks fire-and-forget goroutines (background pushes/caching) so
+	// tests and shutdown can drain them; otherwise they race store teardown.
+	bg sync.WaitGroup
+
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
 }
@@ -73,6 +77,22 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 		shared:           shared,
 		forwarding:       make(map[string]int),
 	}
+}
+
+// goBG runs fn as a tracked fire-and-forget goroutine.
+func (p *Proxy) goBG(fn func()) {
+	p.bg.Add(1)
+	go func() {
+		defer p.bg.Done()
+		fn()
+	}()
+}
+
+// WaitBackground blocks until all fire-and-forget goroutines (background
+// pushes, list-result caching) have finished. Call before tearing down the
+// store — primarily for tests, where the store lives in a TempDir.
+func (p *Proxy) WaitBackground() {
+	p.bg.Wait()
 }
 
 // baseDomain returns the hub's base domain if vhosting is configured.
@@ -244,7 +264,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("[proxy] GET /%s: upstream 404 but found locally, serving + pushing", ref)
-		go p.pushToUpstream(ref, localData)
+		p.goBG(func() { p.pushToUpstream(ref, localData) })
 
 	default:
 		if upstream.IsDown(resp.StatusCode) {
@@ -399,7 +419,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	case http.StatusConflict:
 		// Upstream has newer revision — fetch and cache it
 		log.Printf("[proxy] PUT /%s: upstream conflict, fetching newer version", ref)
-		go p.fetchAndCacheFromUpstream(ref)
+		p.goBG(func() { p.fetchAndCacheFromUpstream(ref) })
 		respBody, _ := io.ReadAll(resp.Body)
 		w.WriteHeader(resp.StatusCode)
 		w.Write(respBody)
@@ -460,7 +480,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	body, _ := io.ReadAll(resp.Body)
 
 	// Background-cache upstream items we don't have locally yet
-	go p.cacheUpstreamListRefs(body)
+	p.goBG(func() { p.cacheUpstreamListRefs(body) })
 
 	authPK := auth.AuthPubkey(r)
 
@@ -691,7 +711,7 @@ func (p *Proxy) CacheLocally(ref string, data []byte) {
 			// Local is newer — push local to upstream instead of downgrading
 			log.Printf("[proxy] cache %s: local rev %d > upstream rev %d, pushing local", ref, existingMeta.Revision, item.Revision)
 			if localData, err := p.store.Read(ref); err == nil && localData != nil {
-				go p.pushToUpstream(ref, localData)
+				p.goBG(func() { p.pushToUpstream(ref, localData) })
 			}
 			return
 		}
@@ -749,7 +769,7 @@ func (p *Proxy) ensureFresh(ref string) {
 		p.CacheLocally(ref, body)
 	case http.StatusNotFound:
 		if data, err := p.store.Read(ref); err == nil && data != nil {
-			go p.pushToUpstream(ref, data)
+			p.goBG(func() { p.pushToUpstream(ref, data) })
 		}
 	default:
 		io.Copy(io.Discard, resp.Body)
@@ -1191,6 +1211,11 @@ func (p *Proxy) ApplyUpstreamEvent(ev events.Event) {
 		return // forward compat: ignore ops we don't know (e.g. future deletes)
 	}
 
+	// `>=` (not `==`) is deliberate: an event for a LOWER revision arriving
+	// while we forward a higher one is obsolete on arrival — our own forward
+	// journals the superseding revision moments later on every outcome path
+	// (success, 409→fetch, unreachable→pending), so downstream still
+	// converges and we avoid passing through a stale invalidation.
 	if rev, inFlight := p.forwardingRevision(ev.Ref); inFlight && rev >= ev.Revision {
 		return // echo of a PUT we are forwarding right now
 	}

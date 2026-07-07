@@ -497,12 +497,13 @@ func (l *Log) ReadSince(cursor string, limit int) (evs []Event, reset bool, err 
 	}
 
 	// Cold path: scan segments (they always contain the full retained range).
-	for _, s := range l.segments {
+	for i, s := range l.segments {
 		if len(evs) >= limit {
 			break
 		}
-		// Skip segments that end before our range begins.
-		if s.firstSeq > l.seq {
+		// Skip segments that end before our range begins: everything we
+		// want lives at or after the next segment's first sequence.
+		if i+1 < len(l.segments) && l.segments[i+1].firstSeq <= since+1 {
 			continue
 		}
 		f, ferr := os.Open(s.path)

@@ -24,7 +24,7 @@ import (
 const (
 	subscriberBackoffMin    = time.Second
 	subscriberBackoffMax    = 60 * time.Second
-	subscriberRetryNoEvents = 10 * time.Minute // upstream is an old hub without /events
+	subscriberRetryNoEvents = time.Hour        // upstream is an old hub without /events (design §5.8)
 	subscriberHealthyAfter  = 30 * time.Second // a stream this long resets the backoff
 )
 
@@ -158,6 +158,12 @@ func (s *Subscriber) streamOnce() error {
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// We bypass Client.Do (its 10s timeout would kill a long-lived
+		// stream), so feed the shared availability signal ourselves — same
+		// contract as SyncPending.pushOne. Skip on our own shutdown.
+		if s.upstream != nil && s.ctx.Err() == nil {
+			s.upstream.SetAvailable(false)
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -166,6 +172,12 @@ func (s *Subscriber) streamOnce() error {
 	case resp.StatusCode == http.StatusNotFound:
 		io.Copy(io.Discard, resp.Body)
 		return errEventsUnsupported
+	case IsDown(resp.StatusCode):
+		if s.upstream != nil {
+			s.upstream.SetAvailable(false)
+		}
+		io.Copy(io.Discard, resp.Body)
+		return fmt.Errorf("upstream /events returned %d", resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
 		io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("upstream /events returned %d", resp.StatusCode)
