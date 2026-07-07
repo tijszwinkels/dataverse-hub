@@ -37,8 +37,9 @@ type Proxy struct {
 	// "all" — all objects are forwarded, including identity-realm and shared-realm.
 	UpstreamPush string
 
-	upstream *upstream.Client
-	pending  *upstream.SyncPending
+	upstream   *upstream.Client
+	pending    *upstream.SyncPending
+	writeLocks *keyedMutex // per-ref serialization of local read-check-write
 }
 
 // NewProxy creates a Proxy with the given components.
@@ -53,6 +54,7 @@ func NewProxy(store *storage.Store, index *storage.Index, limiter *auth.RateLimi
 		upstream:         up,
 		pending:          pending,
 		shared:           shared,
+		writeLocks:       newKeyedMutex(),
 	}
 }
 
@@ -308,9 +310,11 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ifMatch := r.Header.Get("If-Match")
+
 	// Non-global objects (private, server-public) are stored locally only — unless upstream_push = "all"
 	if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
-		p.storePrivateLocally(w, ref, item, canonical, realms)
+		p.storePrivateLocally(w, ref, item, canonical, realms, ifMatch)
 		return
 	}
 
@@ -322,34 +326,43 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
+	// Upstream is the authority for global objects, so let it enforce the
+	// If-Match precondition; a 412 comes back and is relayed below.
+	if ifMatch != "" {
+		upstreamReq.Header.Set("If-Match", ifMatch)
+	}
 
 	resp, err := p.upstream.Do(upstreamReq, canonical)
 	if err != nil {
 		// Upstream unreachable — store locally with sync pending
 		log.Printf("[proxy] WARN: PUT /%s: upstream unreachable, storing locally (sync pending)", ref)
-		p.storeLocallyWithPending(w, ref, item, canonical, realms)
+		p.storeLocallyWithPending(w, ref, item, canonical, realms, ifMatch)
 		return
 	}
 	defer resp.Body.Close()
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
-		// Backup old version before caching
+		// Cache the upstream-accepted object. Lock per ref so the
+		// backup→write→index sequence cannot interleave with another writer.
+		p.writeLocks.Lock(ref)
 		if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
 			if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
 				log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
 			}
 		}
-		// Cache locally
 		ts, _ := item.Timestamp()
 		p.store.Write(ref, canonical, ts)
 		p.index.Update(ref, item, ts, realms)
+		p.writeLocks.Unlock(ref)
 		// Update vhost hash map for PAGE objects
 		if p.Vhost != nil && item.Type == "PAGE" {
 			p.Vhost.AddPage(ref)
 		}
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
+		// Advertise the new revision so clients can chain a conditional write.
+		w.Header().Set("ETag", revisionETag(item.Revision))
 		w.WriteHeader(resp.StatusCode)
 		w.Write(canonical)
 
@@ -948,8 +961,21 @@ func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 }
 
 // storePrivateLocally stores a private object locally without forwarding to upstream.
-func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField) {
+func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
+	// The proxy is the authority for private objects, so enforce the read-check-
+	// write atomically per ref (see keyedMutex).
+	p.writeLocks.Lock(ref)
+	defer p.writeLocks.Unlock(ref)
+
 	existingMeta, isUpdate := p.index.GetMeta(ref)
+
+	if evaluateIfMatch(ifMatch, existingMeta, isUpdate) == ifMatchFail {
+		writeError(w, http.StatusPreconditionFailed,
+			ifMatchFailMessage(existingMeta, isUpdate),
+			"PRECONDITION_FAILED")
+		return
+	}
+
 	if isUpdate && existingMeta.Revision >= item.Revision {
 		writeError(w, http.StatusConflict,
 			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
@@ -981,14 +1007,28 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 	}
 	log.Printf("stored %s rev %d (%s) [private, local-only]", ref, item.Revision, item.Type)
 
+	w.Header().Set("ETag", revisionETag(item.Revision))
 	w.WriteHeader(http.StatusCreated)
 	w.Write(canonical)
 }
 
 // storeLocallyWithPending stores an object locally and adds to sync pending.
-func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField) {
+func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
+	// Upstream is unreachable, so the proxy is temporarily the authority: apply
+	// the same atomic read-check-write and If-Match precondition as elsewhere.
+	p.writeLocks.Lock(ref)
+	defer p.writeLocks.Unlock(ref)
+
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
+
+	if evaluateIfMatch(ifMatch, existingMeta, isUpdate) == ifMatchFail {
+		writeError(w, http.StatusPreconditionFailed,
+			ifMatchFailMessage(existingMeta, isUpdate),
+			"PRECONDITION_FAILED")
+		return
+	}
+
 	if isUpdate && existingMeta.Revision >= item.Revision {
 		writeError(w, http.StatusConflict,
 			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
@@ -1030,6 +1070,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
 
 	// 202 Accepted — stored locally, sync pending
+	w.Header().Set("ETag", revisionETag(item.Revision))
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{
 		"status": "pending_sync",
