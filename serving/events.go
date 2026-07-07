@@ -37,28 +37,31 @@ func emitPut(elog *events.Log, item *object.Item, realms object.InField) {
 }
 
 // eventFilter is the per-subscriber delivery gate: the realm-auth check
-// (identical to GET /{ref}) AND-ed with optional query filters.
+// (identical to GET /{ref}, same merged graph+TOML resolver) AND-ed with
+// optional query filters. The resolver's internal state is live (graph
+// SHARED_REALM ingest mutates it in place), so membership changes apply to
+// in-flight streams.
 type eventFilter struct {
-	authPK string
-	shared *realm.SharedRealms
-	typ    string
-	by     string
-	realm  string
+	authPK   string
+	resolver realm.RealmResolver
+	typ      string
+	by       string
+	realm    string
 }
 
-func filterFromRequest(r *http.Request, shared *realm.SharedRealms) eventFilter {
+func filterFromRequest(r *http.Request, resolver realm.RealmResolver) eventFilter {
 	q := r.URL.Query()
 	return eventFilter{
-		authPK: auth.AuthPubkey(r),
-		shared: shared,
-		typ:    q.Get("type"),
-		by:     q.Get("by"),
-		realm:  q.Get("realm"),
+		authPK:   auth.AuthPubkey(r),
+		resolver: resolver,
+		typ:      q.Get("type"),
+		by:       q.Get("by"),
+		realm:    q.Get("realm"),
 	}
 }
 
 func (f eventFilter) match(ev events.Event) bool {
-	if !realm.CanRead(ev.Realms, f.authPK, f.shared) {
+	if !realm.CanRead(ev.Realms, f.authPK, f.resolver) {
 		return false
 	}
 	if f.typ != "" && ev.Type != f.typ {
@@ -93,12 +96,12 @@ type eventsPage struct {
 // serveEvents handles GET /events for both root and proxy modes.
 // A nil log means events are disabled: 404, indistinguishable from an old
 // hub, which is exactly the feature-detection contract.
-func serveEvents(w http.ResponseWriter, r *http.Request, elog *events.Log, shared *realm.SharedRealms, astore *auth.AuthStore, subs *atomic.Int64, maxSubs int) {
+func serveEvents(w http.ResponseWriter, r *http.Request, elog *events.Log, resolver realm.RealmResolver, astore *auth.AuthStore, subs *atomic.Int64, maxSubs int) {
 	if elog == nil {
 		writeError(w, http.StatusNotFound, "events disabled", "NOT_FOUND")
 		return
 	}
-	filter := filterFromRequest(r, shared)
+	filter := filterFromRequest(r, resolver)
 	if acceptsEventStream(r) {
 		serveEventsSSE(w, r, elog, filter, astore, subs, maxSubs)
 		return

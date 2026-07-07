@@ -113,9 +113,9 @@ func (p *Proxy) Router() http.Handler {
 
 // handleEvents serves the change feed from the proxy's own journal: local
 // writes plus upstream changes it has applied or passed through. Cursors are
-// this hub's — never upstream's.
+// this hub's — never upstream's. Uses the same merged realm resolver as GET.
 func (p *Proxy) handleEvents(w http.ResponseWriter, r *http.Request) {
-	serveEvents(w, r, p.Events, p.shared, p.auth, &p.eventSubs, p.EventsMaxSubscribers)
+	serveEvents(w, r, p.Events, p.index.Resolver(), p.auth, &p.eventSubs, p.EventsMaxSubscribers)
 }
 
 // handleRoot serves GET / with vhost-aware routing.

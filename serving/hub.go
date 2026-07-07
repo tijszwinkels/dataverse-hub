@@ -72,9 +72,10 @@ func (h *Hub) Router() http.Handler {
 	return r
 }
 
-// handleEvents serves the change feed (SSE + JSON replay).
+// handleEvents serves the change feed (SSE + JSON replay). Uses the same
+// merged realm resolver as GET so "receives an event" ⇔ "could GET the ref".
 func (h *Hub) handleEvents(w http.ResponseWriter, r *http.Request) {
-	serveEvents(w, r, h.Events, h.shared, h.auth, &h.eventSubs, h.EventsMaxSubscribers)
+	serveEvents(w, r, h.Events, h.index.Resolver(), h.auth, &h.eventSubs, h.EventsMaxSubscribers)
 }
 
 // handleAuthRealms returns a handler for GET /auth/realms.
