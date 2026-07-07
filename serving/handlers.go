@@ -305,16 +305,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check existing revision via index (no disk I/O)
-	existingMeta, isUpdate := h.index.GetMeta(ref)
-	if isUpdate && existingMeta.Revision >= item.Revision {
-		writeError(w, http.StatusConflict,
-			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
-			"REVISION_CONFLICT")
-		return
-	}
-
-	// Canonicalize for storage
+	// Canonicalize for storage (CPU work — do it before taking the per-ref lock)
 	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("ERROR: PUT /%s: canonical JSON: %v", ref, err)
@@ -325,6 +316,30 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	ts, err := item.Timestamp()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		return
+	}
+
+	// Serialize the read-check-write for this ref so concurrent PUTs cannot both
+	// observe the same prior revision and both commit (optimistic-locking CAS).
+	h.writeLocks.Lock(ref)
+	defer h.writeLocks.Unlock(ref)
+
+	// Check existing revision via index (no disk I/O)
+	existingMeta, isUpdate := h.index.GetMeta(ref)
+
+	// If-Match precondition (RFC 9110). Absent header preserves legacy behavior;
+	// a present header gates the write on the currently-stored revision.
+	if evaluateIfMatch(r.Header.Get("If-Match"), existingMeta, isUpdate) == ifMatchFail {
+		writeError(w, http.StatusPreconditionFailed,
+			ifMatchFailMessage(existingMeta, isUpdate),
+			"PRECONDITION_FAILED")
+		return
+	}
+
+	if isUpdate && existingMeta.Revision >= item.Revision {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
+			"REVISION_CONFLICT")
 		return
 	}
 
@@ -352,6 +367,9 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
+	// Advertise the new revision so clients can chain a subsequent
+	// conditional write with If-Match.
+	w.Header().Set("ETag", revisionETag(item.Revision))
 	if isUpdate {
 		w.WriteHeader(http.StatusOK)
 	} else {
