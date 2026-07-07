@@ -324,22 +324,11 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	h.writeLocks.Lock(ref)
 	defer h.writeLocks.Unlock(ref)
 
-	// Check existing revision via index (no disk I/O)
+	// Check existing revision via index (no disk I/O). If-Match (RFC 9110)
+	// gates the write on the stored revision; an absent header preserves the
+	// legacy revision-monotonicity behavior.
 	existingMeta, isUpdate := h.index.GetMeta(ref)
-
-	// If-Match precondition (RFC 9110). Absent header preserves legacy behavior;
-	// a present header gates the write on the currently-stored revision.
-	if evaluateIfMatch(r.Header.Get("If-Match"), existingMeta, isUpdate) == ifMatchFail {
-		writeError(w, http.StatusPreconditionFailed,
-			ifMatchFailMessage(existingMeta, isUpdate),
-			"PRECONDITION_FAILED")
-		return
-	}
-
-	if isUpdate && existingMeta.Revision >= item.Revision {
-		writeError(w, http.StatusConflict,
-			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
-			"REVISION_CONFLICT")
+	if checkConditionalWrite(w, r.Header.Get("If-Match"), existingMeta, isUpdate, item.Revision) {
 		return
 	}
 

@@ -42,6 +42,10 @@ func (k *keyedMutex) Lock(key string) {
 func (k *keyedMutex) Unlock(key string) {
 	k.mu.Lock()
 	l := k.locks[key]
+	if l == nil {
+		k.mu.Unlock()
+		panic("keyedMutex: Unlock of unlocked key " + key)
+	}
 	l.waiters--
 	if l.waiters == 0 {
 		delete(k.locks, key)

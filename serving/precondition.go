@@ -1,6 +1,8 @@
 package serving
 
 import (
+	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 
@@ -24,6 +26,31 @@ const (
 // so a client can round-trip GET's ETag straight back into a PUT's If-Match.
 func revisionETag(revision int) string {
 	return `"` + strconv.Itoa(revision) + `"`
+}
+
+// checkConditionalWrite gates a pending PUT on both the If-Match precondition
+// and the revision-monotonicity rule, in RFC-correct order (precondition before
+// conflict). It writes the appropriate error response (412 or 409) and reports
+// whether the caller must abort. Shared by the Hub and Proxy write paths so the
+// conditional-write semantics live in one place.
+//
+// existingMeta/exists describe the currently-stored object; incomingRevision is
+// the revision of the object being written. Callers must hold the per-ref write
+// lock so the check and the subsequent write are atomic.
+func checkConditionalWrite(w http.ResponseWriter, ifMatch string, existingMeta object.ObjectMeta, exists bool, incomingRevision int) (abort bool) {
+	if evaluateIfMatch(ifMatch, existingMeta, exists) == ifMatchFail {
+		writeError(w, http.StatusPreconditionFailed,
+			ifMatchFailMessage(existingMeta, exists),
+			"PRECONDITION_FAILED")
+		return true
+	}
+	if exists && existingMeta.Revision >= incomingRevision {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, incomingRevision),
+			"REVISION_CONFLICT")
+		return true
+	}
+	return false
 }
 
 // evaluateIfMatch applies RFC 9110 §13.1.1 If-Match semantics to a PUT that

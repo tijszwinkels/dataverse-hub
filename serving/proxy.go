@@ -345,16 +345,21 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	case http.StatusOK, http.StatusCreated:
 		// Cache the upstream-accepted object. Lock per ref so the
 		// backup→write→index sequence cannot interleave with another writer.
-		p.writeLocks.Lock(ref)
-		if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
-			if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
-				log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+		// Wrapped in a closure so the lock is released via defer even if a
+		// store/index call panics (chi's Recoverer would otherwise swallow the
+		// panic and leak the lock, deadlocking future PUTs to this ref).
+		func() {
+			p.writeLocks.Lock(ref)
+			defer p.writeLocks.Unlock(ref)
+			if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
+				if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
+					log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+				}
 			}
-		}
-		ts, _ := item.Timestamp()
-		p.store.Write(ref, canonical, ts)
-		p.index.Update(ref, item, ts, realms)
-		p.writeLocks.Unlock(ref)
+			ts, _ := item.Timestamp()
+			p.store.Write(ref, canonical, ts)
+			p.index.Update(ref, item, ts, realms)
+		}()
 		// Update vhost hash map for PAGE objects
 		if p.Vhost != nil && item.Type == "PAGE" {
 			p.Vhost.AddPage(ref)
@@ -968,18 +973,7 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 	defer p.writeLocks.Unlock(ref)
 
 	existingMeta, isUpdate := p.index.GetMeta(ref)
-
-	if evaluateIfMatch(ifMatch, existingMeta, isUpdate) == ifMatchFail {
-		writeError(w, http.StatusPreconditionFailed,
-			ifMatchFailMessage(existingMeta, isUpdate),
-			"PRECONDITION_FAILED")
-		return
-	}
-
-	if isUpdate && existingMeta.Revision >= item.Revision {
-		writeError(w, http.StatusConflict,
-			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
-			"REVISION_CONFLICT")
+	if checkConditionalWrite(w, ifMatch, existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
@@ -1021,18 +1015,7 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
-
-	if evaluateIfMatch(ifMatch, existingMeta, isUpdate) == ifMatchFail {
-		writeError(w, http.StatusPreconditionFailed,
-			ifMatchFailMessage(existingMeta, isUpdate),
-			"PRECONDITION_FAILED")
-		return
-	}
-
-	if isUpdate && existingMeta.Revision >= item.Revision {
-		writeError(w, http.StatusConflict,
-			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
-			"REVISION_CONFLICT")
+	if checkConditionalWrite(w, ifMatch, existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
