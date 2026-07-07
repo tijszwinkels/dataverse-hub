@@ -164,8 +164,8 @@ func TestUnknownCursorResets(t *testing.T) {
 	record(l, "Apk.one", 1)
 
 	for _, cursor := range []string{
-		"otherepoch:000000000001", // wrong epoch
-		"garbage",                 // unparseable
+		"otherepoch:000000000001",   // wrong epoch
+		"garbage",                   // unparseable
 		l.Epoch() + ":000000999999", // future seq in same epoch
 	} {
 		_, reset, err := l.ReadSince(cursor, 10)
