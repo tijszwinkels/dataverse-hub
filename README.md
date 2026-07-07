@@ -116,6 +116,35 @@ Query parameters for list endpoints:
 PUT /{ref}              # upsert a signed object (signature verified server-side)
 ```
 
+Every object carries a monotonic `revision`. A successful `PUT` returns the new
+revision as a strong `ETag` (e.g. `ETag: "3"`) — the same tag `GET /{ref}`
+serves for the raw object.
+
+**Default (no `If-Match`)** — last-writer-wins by revision: a `PUT` whose object
+`revision` is greater than the stored one is applied; a `PUT` whose `revision` is
+**less than or equal to** the stored one is rejected `409 Conflict`
+(`REVISION_CONFLICT`). A brand-new ref is created (`201`).
+
+**Conditional (`If-Match`)** — protocol-level optimistic locking (RFC 9110):
+
+```
+PUT /{ref}
+If-Match: "3"           # apply only if the stored object is currently revision 3
+```
+
+- `If-Match: "<rev>"` — proceeds only if the stored revision equals `<rev>`;
+  otherwise `412 Precondition Failed` (`PRECONDITION_FAILED`) and the stored
+  object is left untouched. Comma-separated lists match if any tag matches;
+  weak tags (`W/"…"`) never match.
+- `If-Match: *` — proceeds only if the object already exists; a not-yet-existing
+  ref → `412`. A concrete `If-Match` tag on a missing ref is likewise `412`.
+
+Read-check-write for a given ref is serialized server-side, so concurrent
+conditional writes from the same base revision cannot both commit — exactly one
+wins, the rest get `412`. In proxy mode the upstream hub is the authority for
+global objects (the proxy forwards `If-Match` and relays the `412`); private
+objects are enforced against the proxy's local store.
+
 ### Authentication
 
 ECDSA challenge-response auth. Proves ownership of a P-256 keypair without revealing the private key.
