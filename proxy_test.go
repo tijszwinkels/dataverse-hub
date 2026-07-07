@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"sync/atomic"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -503,15 +504,20 @@ func TestProxyInbound502FallsBackToLocal(t *testing.T) {
 // 404 but the proxy has the object locally, it serves from cache AND pushes
 // the object to upstream.
 func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
-	// Track what upstream receives
+	// Track what upstream receives. The handler runs on the server's
+	// goroutine while the test polls — guard with a mutex (was a data race).
+	var mu sync.Mutex
 	var putReceived bool
 	var putBody []byte
 	fakeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPut {
+			body, _ := io.ReadAll(r.Body)
+			mu.Lock()
 			putReceived = true
-			putBody, _ = io.ReadAll(r.Body)
+			putBody = body
+			mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
-			w.Write(putBody)
+			w.Write(body)
 			return
 		}
 		// GET returns 404 — upstream doesn't have the object
@@ -557,10 +563,13 @@ func TestProxyGet404FallsBackToLocalAndPushes(t *testing.T) {
 	resp.Body.Close()
 
 	// Give the fire-and-forget goroutine a moment to push
-	for i := 0; i < 50 && !putReceived; i++ {
+	received := func() bool { mu.Lock(); defer mu.Unlock(); return putReceived }
+	for i := 0; i < 50 && !received(); i++ {
 		sleepMs(t, 10)
 	}
 
+	mu.Lock()
+	defer mu.Unlock()
 	if !putReceived {
 		t.Error("expected proxy to push object to upstream after 404")
 	}
