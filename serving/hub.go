@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/events"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
@@ -23,6 +25,10 @@ type Hub struct {
 	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 	VhostMode        string
+
+	Events               *events.Log // nil = events disabled (/events → 404)
+	EventsMaxSubscribers int         // 0 = default (256)
+	eventSubs            atomic.Int64
 }
 
 // NewHub creates a Hub with the given components.
@@ -58,11 +64,17 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
 	r.Get("/search", h.handleListObjects)
+	r.Get("/events", h.handleEvents)
 	r.Get("/{ref}", h.handleGetObject)
 	r.Put("/{ref}", h.handlePutObject)
 	r.Get("/{ref}/inbound", h.handleGetInbound)
 
 	return r
+}
+
+// handleEvents serves the change feed (SSE + JSON replay).
+func (h *Hub) handleEvents(w http.ResponseWriter, r *http.Request) {
+	serveEvents(w, r, h.Events, h.shared, h.auth, &h.eventSubs, h.EventsMaxSubscribers)
 }
 
 // handleAuthRealms returns a handler for GET /auth/realms.

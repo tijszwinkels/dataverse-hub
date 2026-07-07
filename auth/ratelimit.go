@@ -150,6 +150,12 @@ func (sc *statusCapture) WriteHeader(code int) {
 	sc.ResponseWriter.WriteHeader(code)
 }
 
+// Unwrap exposes the underlying writer to http.ResponseController, which the
+// SSE events handler needs to clear the write deadline and flush frames.
+func (sc *statusCapture) Unwrap() http.ResponseWriter {
+	return sc.ResponseWriter
+}
+
 // Middleware returns an HTTP middleware that enforces rate limits.
 // 304 Not Modified responses are refunded and do not consume tokens.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {

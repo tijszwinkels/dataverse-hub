@@ -8,11 +8,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/events"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -36,6 +38,14 @@ type Proxy struct {
 	// "public" (default) — only dataverse001 objects are forwarded.
 	// "all" — all objects are forwarded, including identity-realm and shared-realm.
 	UpstreamPush string
+
+	Events               *events.Log // nil = events disabled (/events → 404)
+	EventsMaxSubscribers int         // 0 = default (256)
+	// EventsPrefetch: eagerly fetch upstream event refs not in the local
+	// cache (mirror-ish). Default false: pass events through skinny and keep
+	// cache-on-demand semantics.
+	EventsPrefetch bool
+	eventSubs      atomic.Int64
 
 	upstream *upstream.Client
 	pending  *upstream.SyncPending
@@ -84,11 +94,19 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
 	r.Get("/search", p.handleSearch)
+	r.Get("/events", p.handleEvents)
 	r.Get("/{ref}", p.handleGetObject)
 	r.Put("/{ref}", p.handlePutObject)
 	r.Get("/{ref}/inbound", p.handleInbound)
 
 	return r
+}
+
+// handleEvents serves the change feed from the proxy's own journal: local
+// writes plus upstream changes it has applied or passed through. Cursors are
+// this hub's — never upstream's.
+func (p *Proxy) handleEvents(w http.ResponseWriter, r *http.Request) {
+	serveEvents(w, r, p.Events, p.shared, p.auth, &p.eventSubs, p.EventsMaxSubscribers)
 }
 
 // handleRoot serves GET / with vhost-aware routing.
