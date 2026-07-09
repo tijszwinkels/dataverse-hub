@@ -317,16 +317,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check existing revision via index (no disk I/O)
-	existingMeta, isUpdate := h.index.GetMeta(ref)
-	if isUpdate && existingMeta.Revision >= item.Revision {
-		writeError(w, http.StatusConflict,
-			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, item.Revision),
-			"REVISION_CONFLICT")
-		return
-	}
-
-	// Canonicalize for storage
+	// Canonicalize for storage (CPU work — do it before taking the per-ref lock)
 	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("ERROR: PUT /%s: canonical JSON: %v", ref, err)
@@ -337,6 +328,19 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	ts, err := item.Timestamp()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		return
+	}
+
+	// Serialize the read-check-write for this ref so concurrent PUTs cannot both
+	// observe the same prior revision and both commit (optimistic-locking CAS).
+	h.writeLocks.Lock(ref)
+	defer h.writeLocks.Unlock(ref)
+
+	// Check existing revision via index (no disk I/O). If-Match (RFC 9110)
+	// gates the write on the stored revision; an absent header preserves the
+	// legacy revision-monotonicity behavior.
+	existingMeta, isUpdate := h.index.GetMeta(ref)
+	if checkConditionalWrite(w, r.Header.Get("If-Match"), existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
@@ -364,6 +368,9 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
+	// Advertise the new revision so clients can chain a subsequent
+	// conditional write with If-Match.
+	w.Header().Set("ETag", revisionETag(item.Revision))
 	if isUpdate {
 		w.WriteHeader(http.StatusOK)
 	} else {

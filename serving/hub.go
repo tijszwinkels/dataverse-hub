@@ -23,6 +23,7 @@ type Hub struct {
 	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 	VhostMode        string
+	writeLocks       *keyedMutex // per-ref serialization of PUT read-check-write
 }
 
 // NewHub creates a Hub with the given components.
@@ -35,6 +36,7 @@ func NewHub(store *storage.Store, index *storage.Index, limiter *auth.RateLimite
 		defaultViewerRef: defaultViewerRef,
 		shared:           shared,
 		VhostMode:        VhostModeIsolate,
+		writeLocks:       newKeyedMutex(),
 	}
 }
 
