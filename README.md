@@ -245,6 +245,27 @@ Use this for data that should be publicly accessible on your hub but not spread 
 - `Accept: text/html` — PAGE objects served as HTML; other objects rendered via default viewer
 - BLOB objects (`type: BLOB`) — served as raw content when Accept matches `content.mime_type`. Supports both binary (base64-encoded `content.data`) and text (`content.text`) BLOBs.
 
+### Error responses
+
+Non-2xx responses on the data API (`GET`/`PUT /{ref}`, `/search`, `/{ref}/inbound`, `/auth/*`, and unmatched routes) are content-negotiated (see below): JSON and wildcard clients receive `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)), written for a programmatic consumer:
+
+```json
+{
+  "title": "Revision conflict",
+  "status": 409,
+  "detail": "existing revision 5 >= incoming 3",
+  "next_action": "Fetch the current object (GET /<ref>), set the item's `revision` field above the stored revision, re-sign, and PUT again.",
+  "code": "REVISION_CONFLICT"
+}
+```
+
+- `title` — short, stable summary of the problem class.
+- `detail` — the specific cause of this occurrence.
+- `next_action` — one concrete recovery step (the error message is the product).
+- `code` — machine-stable identifier, preserved from the legacy `{error, code}` body for backward compatibility.
+
+Content is negotiated on `Accept`: JSON and wildcard clients (curl's `*/*`, agents, browsers) receive problem+json; a client that accepts only `text/html` keeps the legacy `{error, code}` body. Status codes are unchanged. Both Hub and Proxy serving modes behave identically.
+
 ### On-demand TLS
 
 ```
