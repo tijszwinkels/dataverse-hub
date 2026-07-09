@@ -198,6 +198,28 @@ func TestHubRevisionConflictProblem(t *testing.T) {
 	assertProblem(t, resp, http.StatusConflict, "REVISION_CONFLICT")
 }
 
+// TestHubPreconditionFailedProblem covers the 412 If-Match class, and confirms
+// the PRECONDITION_FAILED code gets a tailored (non-fallback) next_action.
+func TestHubPreconditionFailedProblem(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	id := "10000012-2222-4222-8222-222222222222"
+	ref := pubkey + "." + id
+
+	data1 := signedObjectWithRevision(t, priv, pubkey, id, []string{"dataverse001"}, "NOTE", 1)
+	doPut(t, ts, ref, data1).Body.Close()
+
+	// If-Match a non-current ETag → 412 precondition failed.
+	data2 := signedObjectWithRevision(t, priv, pubkey, id, []string{"dataverse001"}, "NOTE", 2)
+	resp := doPutWithHeaders(t, ts, ref, data2, map[string]string{"If-Match": `"999"`})
+	p := assertProblem(t, resp, http.StatusPreconditionFailed, "PRECONDITION_FAILED")
+	if p.Title == "Request failed" {
+		t.Errorf("PRECONDITION_FAILED fell through to the generic fallback title")
+	}
+}
+
 // TestHubAuthRealmsUnauthorizedProblem covers /auth/realms without a token.
 func TestHubAuthRealmsUnauthorizedProblem(t *testing.T) {
 	ts, cleanup := testHub(t)

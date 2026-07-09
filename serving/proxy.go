@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -78,7 +79,7 @@ func (p *Proxy) Router() http.Handler {
 	r.Use(jsonContentType)
 
 	r.NotFound(problemNotFound)
-	r.MethodNotAllowed(problemMethodNotAllowed)
+	r.MethodNotAllowed(methodNotAllowedProblem(r))
 
 	// Auth routes
 	r.Get("/auth/challenge", p.auth.HandleChallenge)
@@ -234,7 +235,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		// Forward non-gateway upstream error (4xx, etc.), preserving its
 		// Content-Type so an upgraded upstream's problem+json passes through.
 		body, _ := io.ReadAll(resp.Body)
-		forwardResponse(w, resp, body)
+		forwardResponse(w, r, resp, body)
 		return
 	}
 
@@ -388,22 +389,34 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[proxy] PUT /%s: upstream conflict, fetching newer version", ref)
 		go p.fetchAndCacheFromUpstream(ref)
 		respBody, _ := io.ReadAll(resp.Body)
-		forwardResponse(w, resp, respBody)
+		forwardResponse(w, r, resp, respBody)
 
 	default:
 		// Forward upstream error (400, etc.), preserving its Content-Type so an
 		// upgraded upstream's problem+json passes through unchanged.
 		respBody, _ := io.ReadAll(resp.Body)
-		forwardResponse(w, resp, respBody)
+		forwardResponse(w, r, resp, respBody)
 	}
 }
 
-// forwardResponse relays an upstream response's status, body and Content-Type
-// to the client. Preserving the Content-Type lets an upgraded upstream's
-// application/problem+json error body reach the client intact rather than
-// being mislabelled by the jsonContentType middleware.
-func forwardResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
+// forwardResponse relays an upstream response's status and body to the client.
+//
+// The proxy always queries upstream with Accept: application/json (so it can
+// cache the JSON object), so an upstream problem+json error was negotiated on
+// the proxy's Accept, not the client's. Re-negotiate it here on the *client's*
+// Accept via the shared writer, so an HTML-only client keeps the legacy body
+// and proxy mode matches hub mode. Non-problem bodies are relayed verbatim with
+// the upstream Content-Type preserved.
+func forwardResponse(w http.ResponseWriter, r *http.Request, resp *http.Response, body []byte) {
+	ct := resp.Header.Get("Content-Type")
+	if strings.HasPrefix(ct, object.ProblemMediaType) {
+		var p object.Problem
+		if json.Unmarshal(body, &p) == nil {
+			object.WriteProblem(w, r, resp.StatusCode, p.Detail, p.Code)
+			return
+		}
+	}
+	if ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(resp.StatusCode)

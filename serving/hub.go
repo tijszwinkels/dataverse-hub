@@ -52,7 +52,7 @@ func (h *Hub) Router() http.Handler {
 	r.Use(jsonContentType)
 
 	r.NotFound(problemNotFound)
-	r.MethodNotAllowed(problemMethodNotAllowed)
+	r.MethodNotAllowed(methodNotAllowedProblem(r))
 
 	// Auth routes
 	r.Get("/auth/challenge", h.auth.HandleChallenge)
@@ -131,10 +131,33 @@ func problemNotFound(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, http.StatusNotFound, "no route matches this path", "NOT_FOUND")
 }
 
-// problemMethodNotAllowed is the router's fallback for a known path hit with an
-// unsupported method — it returns an RFC 9457 problem instead of an empty body.
-func problemMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
-	writeError(w, r, http.StatusMethodNotAllowed, "method not allowed for this endpoint", "METHOD_NOT_ALLOWED")
+// methodNotAllowedProblem returns the router's 405 fallback. chi sets the RFC
+// 7231 Allow header for its default handler but drops it for a custom one, so
+// we reconstruct it by probing the router for the methods registered on the
+// path, then return an RFC 9457 problem instead of an empty body.
+func methodNotAllowedProblem(router *chi.Mux) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if allow := allowedMethods(router, r.URL.Path); allow != "" {
+			w.Header().Set("Allow", allow)
+		}
+		writeError(w, r, http.StatusMethodNotAllowed, "method not allowed for this endpoint", "METHOD_NOT_ALLOWED")
+	}
+}
+
+// allowedMethods probes the router for the HTTP methods registered on path,
+// returning them as an RFC 7231 comma-separated Allow value (e.g. "GET, PUT").
+func allowedMethods(router *chi.Mux, path string) string {
+	candidates := []string{
+		http.MethodGet, http.MethodHead, http.MethodPost,
+		http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions,
+	}
+	var allowed []string
+	for _, m := range candidates {
+		if router.Match(chi.NewRouteContext(), m, path) {
+			allowed = append(allowed, m)
+		}
+	}
+	return strings.Join(allowed, ", ")
 }
 
 // jsonContentType sets the Content-Type header to application/json.

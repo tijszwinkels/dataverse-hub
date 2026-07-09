@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -124,6 +127,54 @@ func TestProxyForwardsUpstreamProblem(t *testing.T) {
 	data3 := signedObjectWithRevision(t, priv, pubkey, id, []string{"dataverse001"}, "NOTE", 3)
 	resp := doPut(t, proxySrv, ref, data3)
 	assertProblem(t, resp, http.StatusConflict, "REVISION_CONFLICT")
+}
+
+// TestProxyRelayedErrorNegotiatesOnClientAccept verifies that a relayed upstream
+// error honors the *client's* Accept, not the Accept the proxy used upstream.
+// The proxy always queries upstream with application/json (to cache objects), so
+// without re-negotiation an HTML-only client would wrongly receive problem+json.
+func TestProxyRelayedErrorNegotiatesOnClientAccept(t *testing.T) {
+	proxySrv, _, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	id := "10000011-2222-4222-8222-222222222222"
+	ref := pubkey + "." + id
+
+	data5 := signedObjectWithRevision(t, priv, pubkey, id, []string{"dataverse001"}, "NOTE", 5)
+	if resp := doPut(t, proxySrv, ref, data5); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT rev5: got %d", resp.StatusCode)
+	}
+	data3 := signedObjectWithRevision(t, priv, pubkey, id, []string{"dataverse001"}, "NOTE", 3)
+
+	// HTML-only client: the relayed 409 must be the legacy body, not problem+json.
+	req, _ := http.NewRequest(http.MethodPut, proxySrv.URL+"/"+ref, bytes.NewReader(data3))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/html")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("HTML-only relayed error Content-Type = %q, want application/json (body: %s)", ct, body)
+	}
+	var p object.Problem
+	if err := json.Unmarshal(body, &p); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if p.NextAction != "" {
+		t.Errorf("HTML-only client must not receive next_action, got %q", p.NextAction)
+	}
+	var legacy object.APIError
+	json.Unmarshal(body, &legacy)
+	if legacy.Code != "REVISION_CONFLICT" || legacy.Error == "" {
+		t.Errorf("expected legacy {error, code}, got %+v", legacy)
+	}
 }
 
 // TestProxyAuthRealmsUnauthorizedProblem covers /auth/realms in proxy mode.

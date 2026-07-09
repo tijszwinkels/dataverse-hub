@@ -2,6 +2,7 @@ package main
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -27,6 +28,11 @@ func TestHubRouterMethodNotAllowedProblem(t *testing.T) {
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// RFC 7231 §6.5.5: a 405 MUST carry an Allow header listing supported methods.
+	allow := resp.Header.Get("Allow")
+	if !strings.Contains(allow, "GET") || !strings.Contains(allow, "PUT") {
+		t.Errorf("405 Allow header = %q, want it to list GET and PUT", allow)
 	}
 	assertProblem(t, resp, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED")
 }
