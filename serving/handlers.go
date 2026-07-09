@@ -35,7 +35,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 			h.handleRootLegacy(w, r)
 			return
 		}
-		writeError(w, http.StatusNotFound, "unknown host", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "unknown host", "NOT_FOUND")
 		return
 
 	default:
@@ -66,12 +66,12 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 		data, err := h.store.Read(resolved)
 		if err != nil || data == nil {
 			log.Printf("WARN: vhost root: page %s not found", resolved)
-			writeError(w, http.StatusNotFound, "page not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "page not found", "NOT_FOUND")
 			return
 		}
 		html := h.resolvePageHTML(data)
 		if html == "" {
-			writeError(w, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -84,7 +84,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 func (h *Hub) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 	metas := h.index.GetAll("", "ROOT", "", false)
 	if len(metas) == 0 {
-		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
 	}
 	http.Redirect(w, r, "/"+metas[0].Ref, http.StatusFound)
@@ -97,7 +97,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// Ref-shape gate: reject scanner traffic (/.env, /wp-config.php, …)
 	// without touching the index or the store. Cuts log spam.
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
@@ -108,11 +108,11 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		data, err := h.store.Read(ref)
 		if err != nil {
 			log.Printf("ERROR: GET /%s: %v", ref, err)
-			writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+			writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 			return
 		}
 		if data == nil {
-			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 		// Serve directly (rare fallback)
@@ -140,7 +140,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 				servePrivatePageLogin(w)
 				return
 			}
-			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 	}
@@ -199,11 +199,11 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	data, err := h.store.Read(ref)
 	if err != nil {
 		log.Printf("ERROR: GET /%s: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	if data == nil {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
@@ -249,24 +249,24 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Ref-shape gate — short-circuits before ECDSA verification on garbage URLs.
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read body", "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, "failed to read body", "INVALID_OBJECT")
 		return
 	}
 	if len(body) > maxBodySize {
-		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
+		writeError(w, r, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
 		return
 	}
 
 	// Parse envelope and item
 	env, item, err := object.ParseEnvelope(body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
 		return
 	}
 
@@ -276,7 +276,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Validate pubkey-realms: each must match item.pubkey
 	for _, realm := range realms {
 		if object.IsPubkeyRealm(realm) && realm != item.Pubkey {
-			writeError(w, http.StatusForbidden,
+			writeError(w, r, http.StatusForbidden,
 				"pubkey-realm does not match item pubkey", "REALM_FORBIDDEN")
 			return
 		}
@@ -286,7 +286,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// A valid SHARED_REALM always includes "dataverse001" in item.in (decision 6,
 	// enforced by ParseSharedRealm below), so it passes via the dataverse001 branch.
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, h.index.Resolver()) {
-		writeError(w, http.StatusBadRequest,
+		writeError(w, r, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
@@ -297,7 +297,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// dataverse001 present in item.in.
 	if item.Type == realm.TypeSharedRealm {
 		if _, _, err := realm.ParseSharedRealm(item); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
+			writeError(w, r, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
 			return
 		}
 	}
@@ -305,7 +305,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Check ref matches
 	expectedRef := item.Ref()
 	if ref != expectedRef {
-		writeError(w, http.StatusBadRequest,
+		writeError(w, r, http.StatusBadRequest,
 			fmt.Sprintf("URL ref %q does not match item %q", ref, expectedRef),
 			"REF_MISMATCH")
 		return
@@ -313,7 +313,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Verify signature (CPU-heavy, before acquiring any locks)
 	if err := object.VerifyEnvelope(body); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
 		return
 	}
 
@@ -321,13 +321,13 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("ERROR: PUT /%s: canonical JSON: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 
 	ts, err := item.Timestamp()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
 		return
 	}
 
@@ -340,7 +340,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// gates the write on the stored revision; an absent header preserves the
 	// legacy revision-monotonicity behavior.
 	existingMeta, isUpdate := h.index.GetMeta(ref)
-	if checkConditionalWrite(w, r.Header.Get("If-Match"), existingMeta, isUpdate, item.Revision) {
+	if checkConditionalWrite(w, r, r.Header.Get("If-Match"), existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
@@ -354,7 +354,7 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Write to store
 	if err := h.store.Write(ref, canonical, ts); err != nil {
 		log.Printf("ERROR: PUT /%s: write: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 
@@ -406,7 +406,7 @@ func (h *Hub) handleGetInbound(w http.ResponseWriter, r *http.Request) {
 
 	// Ref-shape gate (see handleGetObject for rationale).
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
@@ -678,9 +678,11 @@ func parseCursor(s string) *object.Cursor {
 	return &c
 }
 
-func writeError(w http.ResponseWriter, status int, msg, code string) {
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
+// writeError writes an RFC 9457 application/problem+json error response,
+// content-negotiated on the request's Accept header (see object.WriteProblem).
+// msg becomes the problem's detail; code selects the stable title/next_action.
+func writeError(w http.ResponseWriter, r *http.Request, status int, msg, code string) {
+	object.WriteProblem(w, r, status, msg, code)
 }
 
 // baseDomain returns the hub's base domain if vhosting is configured.

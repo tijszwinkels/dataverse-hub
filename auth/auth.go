@@ -61,7 +61,7 @@ func (a *AuthStore) HandleChallenge(w http.ResponseWriter, r *http.Request) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		log.Printf("ERROR: auth challenge: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	challenge := base64.RawURLEncoding.EncodeToString(b)
@@ -86,12 +86,12 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 		Signature string `json:"signature"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body", "INVALID_REQUEST")
+		writeError(w, r, http.StatusBadRequest, "invalid JSON body", "INVALID_REQUEST")
 		return
 	}
 
 	if req.Pubkey == "" || req.Challenge == "" || req.Signature == "" {
-		writeError(w, http.StatusBadRequest, "missing required fields: pubkey, challenge, signature", "INVALID_REQUEST")
+		writeError(w, r, http.StatusBadRequest, "missing required fields: pubkey, challenge, signature", "INVALID_REQUEST")
 		return
 	}
 
@@ -104,27 +104,27 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 
 	if !ok || time.Now().After(entry.expiresAt) {
-		writeError(w, http.StatusUnauthorized, "challenge expired or unknown", "CHALLENGE_EXPIRED")
+		writeError(w, r, http.StatusUnauthorized, "challenge expired or unknown", "CHALLENGE_EXPIRED")
 		return
 	}
 
 	// Decode and decompress pubkey
 	pubkeyBytes, err := base64.RawURLEncoding.DecodeString(req.Pubkey)
 	if err != nil || len(pubkeyBytes) != 33 {
-		writeError(w, http.StatusUnauthorized, "invalid pubkey", "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusUnauthorized, "invalid pubkey", "INVALID_SIGNATURE")
 		return
 	}
 
 	pubkey, err := object.DecompressP256(pubkeyBytes)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid pubkey", "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusUnauthorized, "invalid pubkey", "INVALID_SIGNATURE")
 		return
 	}
 
 	// Decode signature (base64 standard → ASN.1 DER)
 	sigBytes, err := base64.StdEncoding.DecodeString(req.Signature)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid signature encoding", "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusUnauthorized, "invalid signature encoding", "INVALID_SIGNATURE")
 		return
 	}
 
@@ -132,14 +132,14 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 		R, S *big.Int
 	}
 	if _, err := asn1.Unmarshal(sigBytes, &sig); err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid signature format", "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusUnauthorized, "invalid signature format", "INVALID_SIGNATURE")
 		return
 	}
 
 	// Verify: sign the raw challenge string as UTF-8 bytes
 	hash := sha256.Sum256([]byte(req.Challenge))
 	if !ecdsa.Verify(pubkey, hash[:], sig.R, sig.S) {
-		writeError(w, http.StatusUnauthorized, "signature verification failed", "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusUnauthorized, "signature verification failed", "INVALID_SIGNATURE")
 		return
 	}
 
@@ -147,7 +147,7 @@ func (a *AuthStore) HandleToken(w http.ResponseWriter, r *http.Request) {
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		log.Printf("ERROR: auth token gen: %v", err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	token := base64.RawURLEncoding.EncodeToString(tokenBytes)
@@ -295,8 +295,8 @@ func (a *AuthStore) cleanup() {
 	}
 }
 
-// writeError writes a JSON error response.
-func writeError(w http.ResponseWriter, status int, msg, code string) {
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(object.APIError{Error: msg, Code: code})
+// writeError writes an RFC 9457 application/problem+json error response,
+// content-negotiated on the request's Accept header (see object.WriteProblem).
+func writeError(w http.ResponseWriter, r *http.Request, status int, msg, code string) {
+	object.WriteProblem(w, r, status, msg, code)
 }

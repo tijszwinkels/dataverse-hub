@@ -37,15 +37,15 @@ func revisionETag(revision int) string {
 // existingMeta/exists describe the currently-stored object; incomingRevision is
 // the revision of the object being written. Callers must hold the per-ref write
 // lock so the check and the subsequent write are atomic.
-func checkConditionalWrite(w http.ResponseWriter, ifMatch string, existingMeta object.ObjectMeta, exists bool, incomingRevision int) (abort bool) {
+func checkConditionalWrite(w http.ResponseWriter, r *http.Request, ifMatch string, existingMeta object.ObjectMeta, exists bool, incomingRevision int) (abort bool) {
 	if evaluateIfMatch(ifMatch, existingMeta, exists) == ifMatchFail {
-		writeError(w, http.StatusPreconditionFailed,
+		writeError(w, r, http.StatusPreconditionFailed,
 			ifMatchFailMessage(existingMeta, exists),
 			"PRECONDITION_FAILED")
 		return true
 	}
 	if exists && existingMeta.Revision >= incomingRevision {
-		writeError(w, http.StatusConflict,
+		writeError(w, r, http.StatusConflict,
 			fmt.Sprintf("existing revision %d >= incoming %d", existingMeta.Revision, incomingRevision),
 			"REVISION_CONFLICT")
 		return true

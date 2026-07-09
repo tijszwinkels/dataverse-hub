@@ -51,6 +51,9 @@ func (h *Hub) Router() http.Handler {
 	r.Use(h.auth.Middleware)
 	r.Use(jsonContentType)
 
+	r.NotFound(problemNotFound)
+	r.MethodNotAllowed(problemMethodNotAllowed)
+
 	// Auth routes
 	r.Get("/auth/challenge", h.auth.HandleChallenge)
 	r.Post("/auth/token", h.auth.HandleToken)
@@ -73,7 +76,7 @@ func handleAuthRealms(resolver realm.RealmResolver) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authPK := auth.AuthPubkey(r)
 		if authPK == "" {
-			writeError(w, http.StatusUnauthorized, "authentication required", "UNAUTHORIZED")
+			writeError(w, r, http.StatusUnauthorized, "authentication required", "UNAUTHORIZED")
 			return
 		}
 		var realms []string
@@ -120,6 +123,18 @@ func requestPort(r *http.Request) string {
 		return ""
 	}
 	return port
+}
+
+// problemNotFound is the router's fallback for unmatched paths — it returns an
+// RFC 9457 problem instead of chi's plain-text "404 page not found".
+func problemNotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, http.StatusNotFound, "no route matches this path", "NOT_FOUND")
+}
+
+// problemMethodNotAllowed is the router's fallback for a known path hit with an
+// unsupported method — it returns an RFC 9457 problem instead of an empty body.
+func problemMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	writeError(w, r, http.StatusMethodNotAllowed, "method not allowed for this endpoint", "METHOD_NOT_ALLOWED")
 }
 
 // jsonContentType sets the Content-Type header to application/json.

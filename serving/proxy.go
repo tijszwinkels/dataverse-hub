@@ -77,6 +77,9 @@ func (p *Proxy) Router() http.Handler {
 	r.Use(p.auth.Middleware)
 	r.Use(jsonContentType)
 
+	r.NotFound(problemNotFound)
+	r.MethodNotAllowed(problemMethodNotAllowed)
+
 	// Auth routes
 	r.Get("/auth/challenge", p.auth.HandleChallenge)
 	r.Post("/auth/token", p.auth.HandleToken)
@@ -107,7 +110,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 			p.handleRootLegacy(w, r)
 			return
 		}
-		writeError(w, http.StatusNotFound, "unknown host", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "unknown host", "NOT_FOUND")
 		return
 
 	default:
@@ -137,12 +140,12 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 		data, err := p.store.Read(resolved)
 		if err != nil || data == nil {
 			log.Printf("[proxy] WARN: vhost root: page %s not found", resolved)
-			writeError(w, http.StatusNotFound, "page not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "page not found", "NOT_FOUND")
 			return
 		}
 		html := p.resolvePageHTML(resolved, data)
 		if html == "" {
-			writeError(w, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -155,7 +158,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleRootLegacy(w http.ResponseWriter, r *http.Request) {
 	metas := p.index.GetAll("", "ROOT", "", false)
 	if len(metas) == 0 {
-		writeError(w, http.StatusNotFound, "no root object", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "no root object", "NOT_FOUND")
 		return
 	}
 	http.Redirect(w, r, "/"+metas[0].Ref, http.StatusFound)
@@ -170,7 +173,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	// call. This protects upstream's per-IP rate limit, since from upstream's
 	// perspective every proxy-forwarded request comes from a single IP.
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
@@ -181,7 +184,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: GET /%s: build request: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	upstreamReq.Header.Set("Accept", "application/json")
@@ -207,7 +210,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("[proxy] ERROR: GET /%s: read upstream body: %v", ref, err)
-			writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+			writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 			return
 		}
 		p.CacheLocally(ref, body)
@@ -215,7 +218,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	case http.StatusNotFound:
 		localData, _ := p.store.Read(ref)
 		if localData == nil {
-			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 		log.Printf("[proxy] GET /%s: upstream 404 but found locally, serving + pushing", ref)
@@ -228,10 +231,10 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 			p.serveFromLocalCache(w, r, ref, clientETag)
 			return
 		}
-		// Forward non-gateway upstream error (4xx, etc.)
+		// Forward non-gateway upstream error (4xx, etc.), preserving its
+		// Content-Type so an upgraded upstream's problem+json passes through.
 		body, _ := io.ReadAll(resp.Body)
-		w.WriteHeader(resp.StatusCode)
-		w.Write(body)
+		forwardResponse(w, resp, body)
 		return
 	}
 
@@ -250,24 +253,24 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Ref-shape gate — short-circuits before ECDSA verification on garbage URLs.
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "failed to read body", "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, "failed to read body", "INVALID_OBJECT")
 		return
 	}
 	if len(body) > maxBodySize {
-		writeError(w, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
+		writeError(w, r, http.StatusRequestEntityTooLarge, "body too large (max 10MB)", "INVALID_OBJECT")
 		return
 	}
 
 	// Parse and validate locally first
 	env, item, err := object.ParseEnvelope(body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, err.Error(), "INVALID_OBJECT")
 		return
 	}
 	realms := object.ResolveIn(env, item)
@@ -275,7 +278,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Validate pubkey-realm ownership: each pubkey-realm must match item.pubkey
 	for _, pr := range object.PubkeyRealms(realms) {
 		if pr != item.Pubkey {
-			writeError(w, http.StatusForbidden,
+			writeError(w, r, http.StatusForbidden,
 				"pubkey-realm does not match item pubkey",
 				"REALM_FORBIDDEN")
 			return
@@ -286,7 +289,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// A valid SHARED_REALM always includes "dataverse001" in item.in (decision 6,
 	// enforced by ParseSharedRealm below), so it passes via the dataverse001 branch.
 	if !realm.ValidateRealmsForPut(realms, item.Pubkey, p.index.Resolver()) {
-		writeError(w, http.StatusBadRequest,
+		writeError(w, r, http.StatusBadRequest,
 			"object must belong to dataverse001, server-public, a self-owned pubkey-realm, or a configured shared realm",
 			"INVALID_OBJECT")
 		return
@@ -294,12 +297,12 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	// Enforce the full SHARED_REALM type contract (decisions 3, 4, 6).
 	if item.Type == realm.TypeSharedRealm {
 		if _, _, err := realm.ParseSharedRealm(item); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
+			writeError(w, r, http.StatusBadRequest, "invalid SHARED_REALM object: "+err.Error(), "INVALID_SHARED_REALM")
 			return
 		}
 	}
 	if ref != item.Ref() {
-		writeError(w, http.StatusBadRequest,
+		writeError(w, r, http.StatusBadRequest,
 			fmt.Sprintf("URL ref %q does not match item %q", ref, item.Ref()),
 			"REF_MISMATCH")
 		return
@@ -307,7 +310,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Local signature verification
 	if err := object.VerifyEnvelope(body); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
+		writeError(w, r, http.StatusBadRequest, err.Error(), "INVALID_SIGNATURE")
 		return
 	}
 
@@ -315,7 +318,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	canonical, err := object.CanonicalJSON(body)
 	if err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: canonical JSON: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 
@@ -323,7 +326,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	// Non-global objects (private, server-public) are stored locally only — unless upstream_push = "all"
 	if !realm.IsGlobalObject(realms) && p.UpstreamPush != "all" {
-		p.storePrivateLocally(w, ref, item, canonical, realms, ifMatch)
+		p.storePrivateLocally(w, r, ref, item, canonical, realms, ifMatch)
 		return
 	}
 
@@ -331,7 +334,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPut, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: build request: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	upstreamReq.Header.Set("Content-Type", "application/json")
@@ -345,7 +348,7 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Upstream unreachable — store locally with sync pending
 		log.Printf("[proxy] WARN: PUT /%s: upstream unreachable, storing locally (sync pending)", ref)
-		p.storeLocallyWithPending(w, ref, item, canonical, realms, ifMatch)
+		p.storeLocallyWithPending(w, r, ref, item, canonical, realms, ifMatch)
 		return
 	}
 	defer resp.Body.Close()
@@ -385,15 +388,26 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		log.Printf("[proxy] PUT /%s: upstream conflict, fetching newer version", ref)
 		go p.fetchAndCacheFromUpstream(ref)
 		respBody, _ := io.ReadAll(resp.Body)
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		forwardResponse(w, resp, respBody)
 
 	default:
-		// Forward upstream error (400, etc.)
+		// Forward upstream error (400, etc.), preserving its Content-Type so an
+		// upgraded upstream's problem+json passes through unchanged.
 		respBody, _ := io.ReadAll(resp.Body)
-		w.WriteHeader(resp.StatusCode)
-		w.Write(respBody)
+		forwardResponse(w, resp, respBody)
 	}
+}
+
+// forwardResponse relays an upstream response's status, body and Content-Type
+// to the client. Preserving the Content-Type lets an upgraded upstream's
+// application/problem+json error body reach the client intact rather than
+// being mislabelled by the jsonContentType middleware.
+func forwardResponse(w http.ResponseWriter, resp *http.Response, body []byte) {
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	w.Write(body)
 }
 
 // handleSearch forwards GET /search to upstream, falls back to local.
@@ -406,7 +420,7 @@ func (p *Proxy) handleInbound(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	// Ref-shape gate (see handleGetObject for rationale).
 	if !object.IsValidRef(ref) {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 	p.forwardListEndpoint(w, r, "/"+ref+"/inbound?"+r.URL.RawQuery)
@@ -418,7 +432,7 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+upstreamPath, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: forward %s: build request: %v", upstreamPath, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	upstreamReq.Header.Set("Accept", "application/json")
@@ -792,7 +806,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	if !found {
 		data, err := p.store.Read(ref)
 		if err != nil || data == nil {
-			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 		p.serveObjectData(w, r, ref, data)
@@ -819,7 +833,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 				servePrivatePageLogin(w)
 				return
 			}
-			writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 	}
@@ -872,7 +886,7 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 
 	data, err := p.store.Read(ref)
 	if err != nil || data == nil {
-		writeError(w, http.StatusNotFound, "object not found", "NOT_FOUND")
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
 	p.serveObjectData(w, r, ref, data)
@@ -975,20 +989,20 @@ func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
 }
 
 // storePrivateLocally stores a private object locally without forwarding to upstream.
-func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
+func (p *Proxy) storePrivateLocally(w http.ResponseWriter, r *http.Request, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
 	// The proxy is the authority for private objects, so enforce the read-check-
 	// write atomically per ref (see keyedMutex).
 	p.writeLocks.Lock(ref)
 	defer p.writeLocks.Unlock(ref)
 
 	existingMeta, isUpdate := p.index.GetMeta(ref)
-	if checkConditionalWrite(w, ifMatch, existingMeta, isUpdate, item.Revision) {
+	if checkConditionalWrite(w, r, ifMatch, existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
 	ts, err := item.Timestamp()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
 		return
 	}
 
@@ -1000,7 +1014,7 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 
 	if err := p.store.Write(ref, canonical, ts); err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: store write: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	p.index.Update(ref, item, ts, realms)
@@ -1016,7 +1030,7 @@ func (p *Proxy) storePrivateLocally(w http.ResponseWriter, ref string, item *obj
 }
 
 // storeLocallyWithPending stores an object locally and adds to sync pending.
-func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
+func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, r *http.Request, ref string, item *object.Item, canonical []byte, realms object.InField, ifMatch string) {
 	// Upstream is unreachable, so the proxy is temporarily the authority: apply
 	// the same atomic read-check-write and If-Match precondition as elsewhere.
 	p.writeLocks.Lock(ref)
@@ -1024,13 +1038,13 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 
 	// Check revision against local index
 	existingMeta, isUpdate := p.index.GetMeta(ref)
-	if checkConditionalWrite(w, ifMatch, existingMeta, isUpdate, item.Revision) {
+	if checkConditionalWrite(w, r, ifMatch, existingMeta, isUpdate, item.Revision) {
 		return
 	}
 
 	ts, err := item.Timestamp()
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
+		writeError(w, r, http.StatusBadRequest, "invalid timestamp: "+err.Error(), "INVALID_OBJECT")
 		return
 	}
 
@@ -1044,14 +1058,14 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, ref string, item 
 	// Write to sync_pending first (crash safety)
 	if err := p.pending.Add(ref, canonical); err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: sync pending add: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 
 	// Write to main store
 	if err := p.store.Write(ref, canonical, ts); err != nil {
 		log.Printf("[proxy] ERROR: PUT /%s: store write: %v", ref, err)
-		writeError(w, http.StatusInternalServerError, "internal error", "INTERNAL")
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
 	p.index.Update(ref, item, ts, realms)
