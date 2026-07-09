@@ -22,6 +22,11 @@ func TestAcceptsProblemJSON(t *testing.T) {
 		{"text/html", false},                                // HTML-only client
 		{"text/html; charset=utf-8", false},                 // HTML-only with params
 		{"image/png", false},                                // non-JSON, non-wildcard
+		{"Application/JSON", true},                          // case-insensitive media type
+		{"APPLICATION/*", true},                             // case-insensitive wildcard
+		{"application/json;q=0", false},                     // explicit refusal (RFC 7231 q=0)
+		{"application/json;q=0.5", true},                    // positive quality
+		{"*/*;q=0", false},                                  // refuses everything
 	}
 	for _, c := range cases {
 		if got := AcceptsProblemJSON(c.accept); got != c.want {
@@ -37,6 +42,7 @@ func TestProblemCatalogCoverage(t *testing.T) {
 		"NOT_FOUND", "INTERNAL", "INVALID_OBJECT", "REALM_FORBIDDEN",
 		"REF_MISMATCH", "INVALID_SIGNATURE", "REVISION_CONFLICT",
 		"UNAUTHORIZED", "INVALID_REQUEST", "CHALLENGE_EXPIRED", "RATE_LIMITED",
+		"METHOD_NOT_ALLOWED", "PRECONDITION_FAILED", "INVALID_SHARED_REALM",
 	}
 	for _, code := range codes {
 		p := ProblemFor(400, "some detail", code)

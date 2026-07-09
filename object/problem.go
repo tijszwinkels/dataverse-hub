@@ -3,6 +3,7 @@ package object
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -134,9 +135,29 @@ func AcceptsProblemJSON(accept string) bool {
 		return true
 	}
 	for _, part := range strings.Split(accept, ",") {
-		mt := strings.TrimSpace(strings.SplitN(part, ";", 2)[0])
+		fields := strings.Split(part, ";")
+		mt := strings.ToLower(strings.TrimSpace(fields[0])) // media types are case-insensitive
 		switch mt {
 		case "*/*", "application/*", "application/json", ProblemMediaType:
+		default:
+			continue
+		}
+		if hasZeroQuality(fields[1:]) {
+			continue // RFC 7231 §5.3.1: q=0 means "not acceptable"
+		}
+		return true
+	}
+	return false
+}
+
+// hasZeroQuality reports whether an Accept media-range's parameters set q=0.
+func hasZeroQuality(params []string) bool {
+	for _, p := range params {
+		p = strings.TrimSpace(p)
+		if !strings.HasPrefix(strings.ToLower(p), "q=") {
+			continue
+		}
+		if q, err := strconv.ParseFloat(strings.TrimSpace(p[2:]), 64); err == nil && q == 0 {
 			return true
 		}
 	}

@@ -247,7 +247,7 @@ Use this for data that should be publicly accessible on your hub but not spread 
 
 ### Error responses
 
-Every non-2xx response on the data API (`GET`/`PUT /{ref}`, `/search`, `/{ref}/inbound`, `/auth/*`, and unmatched routes) is `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)), written for a programmatic consumer:
+Non-2xx responses on the data API (`GET`/`PUT /{ref}`, `/search`, `/{ref}/inbound`, `/auth/*`, and unmatched routes) are content-negotiated (see below): JSON and wildcard clients receive `application/problem+json` ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)), written for a programmatic consumer:
 
 ```json
 {
