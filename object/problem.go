@@ -98,6 +98,14 @@ var problemCatalog = map[string]problemInfo{
 		title:      "Invalid SHARED_REALM object",
 		nextAction: "Fix the SHARED_REALM object to satisfy its type contract: use an owner-prefixed realm whose key you sign with, set the object id to RealmID(realm), and include 'dataverse001' in item.in. Re-sign and retry.",
 	},
+	"NOT_BLOB": {
+		title:      "Not a BLOB",
+		nextAction: "GET /<ref>/raw serves only BLOB objects (content.mime_type + bytes). Use GET /<ref>/json for the object's JSON envelope, or GET /<ref>/page for its HTML view.",
+	},
+	"NO_PAGE": {
+		title:      "No page representation",
+		nextAction: "GET /<ref>/page needs a PAGE, an object with a `page` relation, or a configured default viewer. Use GET /<ref>/json for the object's JSON envelope, or GET /<ref>/raw if it is a BLOB.",
+	},
 }
 
 // problemFallback backs any code missing from the catalog, so an unmapped code

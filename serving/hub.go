@@ -66,6 +66,9 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/{ref}", h.handleGetObject)
 	r.Put("/{ref}", h.handlePutObject)
 	r.Get("/{ref}/inbound", h.handleGetInbound)
+	r.Get("/{ref}/json", h.handleGetJSON)
+	r.Get("/{ref}/raw", h.handleGetRaw)
+	r.Get("/{ref}/page", h.handleGetPage)
 
 	return r
 }

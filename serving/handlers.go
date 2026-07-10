@@ -469,49 +469,24 @@ func acceptsMimeType(r *http.Request, mimeType string) bool {
 // request's Accept header. If so, it serves the raw content with the correct
 // Content-Type and cache headers. Supports both binary BLOBs (content.data,
 // base64-encoded) and text BLOBs (content.text, plain string). Returns true
-// if it handled the response.
+// if it handled the response. The explicit GET /{ref}/raw path shares the same
+// bytes via blobRaw/writeBlobBytes but skips the Accept gate.
 func serveBlob(w http.ResponseWriter, r *http.Request, data []byte) bool {
-	_, item, err := object.ParseEnvelope(data)
-	if err != nil || item.Type != "BLOB" || item.Content == nil {
+	b, ok := blobContent(data)
+	if !ok {
 		return false
 	}
-
-	var content struct {
-		MimeType string `json:"mime_type"`
-		Data     string `json:"data"`
-		Text     string `json:"text"`
-	}
-	if err := json.Unmarshal(item.Content, &content); err != nil || content.MimeType == "" {
+	// Gate on Accept BEFORE decoding: a mismatched request (e.g. a browser's
+	// text/html for a BLOB with no page relation) must not pay a full base64
+	// decode, nor log a WARN on corrupt data it never intended to serve.
+	if !acceptsMimeType(r, b.mimeType) {
 		return false
 	}
-
-	// Need either data (base64) or text (plain)
-	if content.Data == "" && content.Text == "" {
+	raw, ok := b.decode()
+	if !ok {
 		return false
 	}
-
-	if !acceptsMimeType(r, content.MimeType) {
-		return false
-	}
-
-	var raw []byte
-	if content.Text != "" {
-		// Text BLOB: serve plain string directly
-		raw = []byte(content.Text)
-	} else {
-		// Binary BLOB: decode base64
-		raw, err = base64.StdEncoding.DecodeString(content.Data)
-		if err != nil {
-			log.Printf("WARN: serveBlob %s: base64 decode: %v", item.Ref(), err)
-			return false
-		}
-	}
-
-	w.Header().Set("Content-Type", content.MimeType)
-	w.Header().Set("Content-Length", strconv.Itoa(len(raw)))
-	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
-	w.WriteHeader(http.StatusOK)
-	w.Write(raw)
+	writeBlobBytes(w, b.mimeType, raw)
 	return true
 }
 

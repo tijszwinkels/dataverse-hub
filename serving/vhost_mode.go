@@ -58,14 +58,22 @@ func canonicalPageHost(mode string, resolver *vhost.Resolver, host, pageRef stri
 }
 
 func pageRedirectTarget(mode string, resolver *vhost.Resolver, r *http.Request, ref, pageRef string) string {
+	return pageRedirectTargetPath(mode, resolver, r, ref, pageRef, "")
+}
+
+// pageRedirectTargetPath is pageRedirectTarget with an extra path suffix appended
+// after the ref (e.g. "/page"). This lets an explicit representation path keep
+// its suffix across a canonical-host redirect, instead of silently collapsing to
+// bare /{ref} and reintroducing Accept negotiation on the target origin.
+func pageRedirectTargetPath(mode string, resolver *vhost.Resolver, r *http.Request, ref, pageRef, pathSuffix string) string {
 	scheme := requestScheme(r)
 	port := requestPort(r)
 
 	switch normalizeVhostMode(mode) {
 	case VhostModeRedirect:
-		return fmt.Sprintf("%s://%s%s/%s", scheme, resolver.BaseDomain(), port, ref)
+		return fmt.Sprintf("%s://%s%s/%s%s", scheme, resolver.BaseDomain(), port, ref, pathSuffix)
 	default:
 		hash := vhost.PageHash(pageRef)
-		return fmt.Sprintf("%s://%s.%s%s/%s", scheme, hash, resolver.BaseDomain(), port, ref)
+		return fmt.Sprintf("%s://%s.%s%s/%s%s", scheme, hash, resolver.BaseDomain(), port, ref, pathSuffix)
 	}
 }
