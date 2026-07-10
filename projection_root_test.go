@@ -218,6 +218,126 @@ func TestRootReprRedirectMode_Hub(t *testing.T) {
 	}
 }
 
+// --- Hub: VhostModeRedirect on a PRIVATE page host — auth-gated redirect ---
+
+// In redirect mode the alias 302's Location carries the resolved ref. For a
+// PRIVATE page that would disclose existence AND the owner-pubkey ref behind a
+// one-way hash-host, so the redirect must be auth-gated: unauthenticated (or
+// wrong-identity) callers get the same non-disclosing 404 as a nonexistent
+// ref; the authorized owner gets the suffix-preserving 302 as usual.
+func TestRootReprRedirectModePrivate_Hub(t *testing.T) {
+	ts, _, cleanup := testHubWithVhostMode(t, "example.com", serving.VhostModeRedirect, nil)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	ref, data := makePrivatePage(t, priv, pubkey, "eeee1111-2222-4333-8444-555555555555")
+	putOK(t, ts, ref, data) // PUT registers the PAGE's hash host
+
+	hash := vhost.PageHash(ref)
+
+	// Baseline: the 404 body a nonexistent ref produces on a projection path.
+	missing := "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.00000000-0000-4000-8000-000000000001"
+	missingResp := doGetWithAccept(t, ts, "/"+missing+"/json", "application/json")
+	missingBody, _ := io.ReadAll(missingResp.Body)
+	missingResp.Body.Close()
+
+	// (1) Unauthenticated → 404 problem+json, no Location, body byte-identical
+	// to the nonexistent-ref 404 (existence must not be distinguishable).
+	for _, suffix := range []string{"/json", "/raw", "/page"} {
+		resp := doGetWithHost(t, ts, suffix, hash+".example.com", "application/json")
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("unauth GET %s on private page host: expected 404, got %d", suffix, resp.StatusCode)
+		}
+		if loc := resp.Header.Get("Location"); loc != "" {
+			t.Errorf("unauth GET %s: Location header must be absent, got %q", suffix, loc)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !bytes.Equal(body, missingBody) {
+			t.Errorf("unauth GET %s: 404 body %s differs from nonexistent-ref body %s", suffix, body, missingBody)
+		}
+	}
+
+	// (2) Authenticated owner → 302 with the suffix-preserving Location.
+	token := authenticateAs(t, ts, priv, pubkey)
+	for _, suffix := range []string{"/json", "/raw", "/page"} {
+		resp := doGetWithHostAndToken(t, ts, suffix, hash+".example.com", "application/json", token)
+		if resp.StatusCode != http.StatusFound {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("owner GET %s on private page host: expected 302, got %d: %s", suffix, resp.StatusCode, body)
+		}
+		want := fmt.Sprintf("http://example.com/%s%s", ref, suffix)
+		if loc := resp.Header.Get("Location"); loc != want {
+			t.Errorf("owner GET %s redirect Location = %q, want %q", suffix, loc, want)
+		}
+		resp.Body.Close()
+	}
+}
+
+// --- Proxy: VhostModeRedirect on a PRIVATE page host — auth-gated redirect ---
+
+func TestRootReprRedirectModePrivate_Proxy(t *testing.T) {
+	proxySrv, cleanup := testRootAndVhostProxyMode(t, "example.com", serving.VhostModeRedirect)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	ref, data := makePrivatePage(t, priv, pubkey, "ffff1111-2222-4333-8444-666666666666")
+	// Private objects are stored on the proxy locally; PUT registers the hash host.
+	if resp := doPut(t, proxySrv, ref, data); resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT private page via proxy: expected 201, got %d: %s", resp.StatusCode, body)
+	} else {
+		resp.Body.Close()
+	}
+
+	hash := vhost.PageHash(ref)
+
+	// (1) Unauthenticated → 404, no Location.
+	resp := doGetWithHost(t, proxySrv, "/json", hash+".example.com", "application/json")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unauth proxy GET /json on private page host: expected 404, got %d", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); loc != "" {
+		t.Errorf("unauth proxy GET /json: Location header must be absent, got %q", loc)
+	}
+	resp.Body.Close()
+
+	// (2) Authenticated owner → 302 with the suffix-preserving Location.
+	token := authenticateAs(t, proxySrv, priv, pubkey)
+	resp = doGetWithHostAndToken(t, proxySrv, "/json", hash+".example.com", "application/json", token)
+	if resp.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("owner proxy GET /json on private page host: expected 302, got %d: %s", resp.StatusCode, body)
+	}
+	want := fmt.Sprintf("http://example.com/%s/json", ref)
+	if loc := resp.Header.Get("Location"); loc != want {
+		t.Errorf("owner proxy GET /json redirect Location = %q, want %q", loc, want)
+	}
+	resp.Body.Close()
+}
+
+// doGetWithHostAndToken is doGetWithHost with a bearer token, not following
+// redirects.
+func doGetWithHostAndToken(t *testing.T, ts *httptest.Server, path, host, accept, token string) *http.Response {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+path, nil)
+	req.Host = host
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 // --- Hub: existing /{ref}/... routes and /{ref} routing must be unaffected ---
 
 func TestRootReprRoutingUnaffected_Hub(t *testing.T) {
