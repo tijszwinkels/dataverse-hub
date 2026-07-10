@@ -98,9 +98,32 @@ Objects are identified by composite key: `{pubkey}.{id}`.
 
 ```
 GET /{ref}              # single object (JSON or HTML based on Accept header)
+GET /{ref}/json         # signed JSON envelope, always (ignores Accept)
+GET /{ref}/raw          # the object's native content (ignores Accept)
+GET /{ref}/page         # HTML view: inline PAGE, page-relation viewer, or default viewer
 GET /{ref}/inbound      # objects pointing at this ref
 GET /search             # list/filter objects
 ```
+
+`GET /{ref}` negotiates the representation from the `Accept` header (see
+[Content negotiation](#content-negotiation)). The `/json`, `/raw`, and `/page`
+suffixes pin one representation regardless of `Accept`:
+
+- **`/raw`** — the object's content in its *native* media type: a BLOB's bytes
+  with its `content.mime_type`, or a PAGE's OWN `content.html` as `text/html`.
+  It never renders a page-relation or default viewer (that stays `/page`'s job),
+  so a PAGE with a `page` relation still serves its own html here. `409 NO_RAW`
+  when the object has no native representation (e.g. a non-BLOB non-PAGE, or a
+  PAGE with empty html). Because a PAGE's `/raw` is author-controlled HTML, it
+  gets the same per-app origin-isolation redirect as `/page` (keyed on the object
+  being a PAGE). HTML-mime BLOBs are intentionally still served on the shared
+  origin (issue #14).
+- **`/page`** — `409 NO_PAGE` when there is no HTML view.
+
+Each suffix shares `GET /{ref}`'s realm auth (an unauthorized private object
+returns `404`, not `403`, to avoid leaking existence) and, where the bytes
+coincide, its `ETag`/`If-None-Match` semantics so a client can revalidate either
+URL interchangeably.
 
 Query parameters for list endpoints:
 - `by={pubkey}` — filter by author

@@ -98,9 +98,9 @@ var problemCatalog = map[string]problemInfo{
 		title:      "Invalid SHARED_REALM object",
 		nextAction: "Fix the SHARED_REALM object to satisfy its type contract: use an owner-prefixed realm whose key you sign with, set the object id to RealmID(realm), and include 'dataverse001' in item.in. Re-sign and retry.",
 	},
-	"NOT_BLOB": {
-		title:      "Not a BLOB",
-		nextAction: "GET /<ref>/raw serves only BLOB objects (content.mime_type + bytes). Use GET /<ref>/json for the object's JSON envelope, or GET /<ref>/page for its HTML view.",
+	"NO_RAW": {
+		title:      "No raw representation",
+		nextAction: "GET /<ref>/raw serves an object's native content — a BLOB's bytes (content.mime_type) or a PAGE's own content.html — and this object has neither. Use GET /<ref>/json for its JSON envelope, or GET /<ref>/page for an HTML view (which can also render a page-relation or default viewer).",
 	},
 	"NO_PAGE": {
 		title:      "No page representation",

@@ -19,7 +19,11 @@ import (
 // GET /{ref}: each URL pins one representation regardless of Accept.
 //
 //	GET /{ref}/json — the signed JSON envelope, always.
-//	GET /{ref}/raw  — a BLOB's bytes with its content.mime_type; 409 if not a BLOB.
+//	GET /{ref}/raw  — the object's content in its native media type: a BLOB's
+//	                  bytes with its content.mime_type, or a PAGE's OWN
+//	                  content.html as text/html (never a page-relation or default
+//	                  viewer — that composition is /page's job). 409 if the object
+//	                  has no such native representation.
 //	GET /{ref}/page — an HTML view (inline PAGE, page-relation viewer, or the
 //	                  configured default viewer); 409 if no HTML representation.
 //
@@ -82,16 +86,23 @@ func serveJSON(w http.ResponseWriter, r *http.Request, store *storage.Store, ref
 	w.Write(data)
 }
 
-// serveRaw writes a BLOB's raw bytes with its content.mime_type, regardless of
-// Accept. 409 for a non-BLOB or a BLOB without servable content. ETag
-// "<rev>-blob" and 304 match GET /{ref}'s raw-BLOB representation.
-func serveRaw(w http.ResponseWriter, r *http.Request, store *storage.Store, ref string, meta object.ObjectMeta, found bool) {
+// serveRaw writes an object's content in its native media type, regardless of
+// Accept: a BLOB's decoded bytes with its content.mime_type, or a PAGE's OWN
+// content.html as text/html. It never follows a page relation or the default
+// viewer — that composition is /page's job — so a PAGE with a page relation
+// still serves its own html here. 409 NO_RAW for anything else (a non-BLOB
+// non-PAGE, a BLOB without servable content, or a degenerate PAGE with empty
+// html). ETag/304 match GET /{ref}'s representation of the same bytes; see
+// rawETagSuffix for the exact suffixes and the deliberate page-relation
+// divergence.
+func serveRaw(w http.ResponseWriter, r *http.Request, store *storage.Store, ref string, meta object.ObjectMeta, found bool, baseDomain string) {
 	if found {
-		if meta.Type != "BLOB" || meta.MimeType == "" {
-			writeError(w, r, http.StatusConflict, "object is not a BLOB", "NOT_BLOB")
+		suffix, ok := rawETagSuffix(meta)
+		if !ok {
+			writeError(w, r, http.StatusConflict, "object has no raw representation", "NO_RAW")
 			return
 		}
-		etag := `"` + strconv.Itoa(meta.Revision) + `-blob"`
+		etag := `"` + strconv.Itoa(meta.Revision) + suffix + `"`
 		w.Header().Set("ETag", etag)
 		if r.Header.Get("If-None-Match") == etag {
 			w.WriteHeader(http.StatusNotModified)
@@ -102,12 +113,57 @@ func serveRaw(w http.ResponseWriter, r *http.Request, store *storage.Store, ref 
 	if !ok {
 		return
 	}
-	mime, raw, isBlob := blobRaw(data)
-	if !isBlob {
-		writeError(w, r, http.StatusConflict, "object is not a BLOB", "NOT_BLOB")
+	// BLOB: bytes with content.mime_type — byte-for-byte unchanged.
+	if mime, raw, isBlob := blobRaw(data); isBlob {
+		writeBlobBytes(w, mime, raw)
 		return
 	}
-	writeBlobBytes(w, mime, raw)
+	// PAGE: its OWN html, injected with the base-domain meta like every other
+	// HTML-serving path (so it matches GET /{ref}'s HTML body exactly for the
+	// no-page-relation case, keeping the shared ETag honest).
+	if html := pageOwnHTML(data); html != "" {
+		writePageHTML(w, html, baseDomain)
+		return
+	}
+	writeError(w, r, http.StatusConflict, "object has no raw representation", "NO_RAW")
+}
+
+// rawETagSuffix returns the ETag suffix GET /{ref}/raw uses for meta, and
+// ok=false when meta has no native raw representation (409 NO_RAW).
+//
+//   - BLOB with a mime_type → "-blob", matching GET /{ref}'s raw-BLOB ETag.
+//   - inline PAGE (no page relation) → "-html". GET /{ref}'s HTML representation
+//     is that same content.html, so reusing "-html" keeps revalidation across
+//     the two URLs interchangeable (the parity contract).
+//   - PAGE WITH a page relation → "-raw", a DELIBERATELY distinct suffix. /raw
+//     serves the PAGE's own html, but GET /{ref}/page composes the page-relation
+//     viewer (a different body /raw never serves); a shared ETag could then hand
+//     a client a false 304 across the two representations. The distinct suffix
+//     also future-proofs the invariant if resolvePageHTML ever starts following
+//     a PAGE's own page relation.
+func rawETagSuffix(meta object.ObjectMeta) (string, bool) {
+	switch {
+	case meta.Type == "BLOB" && meta.MimeType != "":
+		return "-blob", true
+	case meta.Type == "PAGE":
+		if meta.HasPageRelation {
+			return "-raw", true
+		}
+		return "-html", true
+	default:
+		return "", false
+	}
+}
+
+// pageOwnHTML returns a PAGE object's OWN content.html, or "" if data is not a
+// PAGE or its html is empty (a degenerate object). It never follows a page
+// relation — unlike resolvePageHTML — because /raw pins the object's own content.
+func pageOwnHTML(data []byte) string {
+	_, item, err := object.ParseEnvelope(data)
+	if err != nil || item.Type != "PAGE" {
+		return ""
+	}
+	return extractHTML(item)
 }
 
 // serveProjectionPage forces the HTML representation. renderPage resolves an
@@ -146,30 +202,58 @@ func serveProjectionPage(w http.ResponseWriter, r *http.Request, store *storage.
 	writeError(w, r, http.StatusConflict, "object has no page representation", "NO_PAGE")
 }
 
+// vhostRedirect issues the per-app origin-isolation 302 for an author-controlled
+// HTML representation. It 302s to the canonical page host for pageRef when the
+// request hit a non-canonical host, preserving the given path suffix (e.g.
+// "/page", "/raw") and the query string so the target still pins that
+// representation. Returns true if it redirected; the caller must then stop.
+// The pageVhostRedirect / rawVhostRedirect wrappers decide whether to redirect
+// and pick pageRef, because /page and /raw canonicalize differently (see each).
+func vhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resolver, vhostMode, ref, pageRef, pathSuffix string) bool {
+	if resolver == nil {
+		return false
+	}
+	if canonicalPageHost(vhostMode, resolver, r.Host, pageRef) {
+		return false
+	}
+	target := pageRedirectTargetPath(vhostMode, resolver, r, ref, pageRef, pathSuffix)
+	if r.URL.RawQuery != "" {
+		target += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+	return true
+}
+
 // pageVhostRedirect enforces per-app origin isolation for GET /{ref}/page. When
 // the object is a PAGE (or resolves one via a page relation) and the request hit
 // a non-canonical host, it 302s to the canonical page host — the same check
 // GET /{ref} makes, minus the acceptsHTML gate (/page always serves HTML, so the
-// shared-origin exposure exists for every Accept). The redirect preserves the
-// /page suffix and query string so the target still pins the HTML representation.
-// Returns true if it redirected; the caller must then stop.
+// shared-origin exposure exists for every Accept). It canonicalizes on the
+// resolved PAGE ref: the page-relation target when there is one, else the
+// object's own ref.
 func pageVhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resolver, vhostMode, ref string, meta object.ObjectMeta) bool {
-	if resolver == nil || !(meta.Type == "PAGE" || meta.HasPageRelation) {
+	if !(meta.Type == "PAGE" || meta.HasPageRelation) {
 		return false
 	}
 	pageRef := ref
 	if meta.HasPageRelation && meta.PageRef != "" {
 		pageRef = meta.PageRef
 	}
-	if canonicalPageHost(vhostMode, resolver, r.Host, pageRef) {
+	return vhostRedirect(w, r, resolver, vhostMode, ref, pageRef, "/page")
+}
+
+// rawVhostRedirect enforces per-app origin isolation for GET /{ref}/raw. /raw on
+// a PAGE serves the PAGE's OWN author-controlled html, so it needs the same
+// canonical-host 302 as /page — but keyed strictly on the OBJECT being a PAGE,
+// canonicalized on the PAGE's OWN ref (never a page-relation target, which /raw
+// ignores). A non-PAGE object — including one carrying a page relation, or an
+// HTML-mime BLOB (out of scope, issue #14) — is served on the shared origin and
+// must NOT redirect (a non-PAGE with a page relation 409s on /raw instead).
+func rawVhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resolver, vhostMode, ref string, meta object.ObjectMeta) bool {
+	if meta.Type != "PAGE" {
 		return false
 	}
-	target := pageRedirectTargetPath(vhostMode, resolver, r, ref, pageRef, "/page")
-	if r.URL.RawQuery != "" {
-		target += "?" + r.URL.RawQuery
-	}
-	http.Redirect(w, r, target, http.StatusFound)
-	return true
+	return vhostRedirect(w, r, resolver, vhostMode, ref, ref, "/raw")
 }
 
 // blobPayload is a BLOB's servable content, parsed but not yet base64-decoded.
@@ -270,7 +354,12 @@ func (h *Hub) handleGetRaw(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	serveRaw(w, r, h.store, ref, meta, found)
+	// Auth (authorizeProjection) runs BEFORE the redirect so an unauthorized
+	// private object 404s and never leaks existence via a Location header.
+	if rawVhostRedirect(w, r, h.Vhost, h.VhostMode, ref, meta) {
+		return
+	}
+	serveRaw(w, r, h.store, ref, meta, found, h.baseDomain())
 }
 
 // handleGetPage serves GET /{ref}/page.
@@ -315,7 +404,8 @@ func (p *Proxy) handleGetJSON(w http.ResponseWriter, r *http.Request) {
 	serveJSON(w, r, p.store, ref, meta, found)
 }
 
-// handleGetRaw serves GET /{ref}/raw in proxy mode.
+// handleGetRaw serves GET /{ref}/raw in proxy mode. syncPageDeps stays false:
+// /raw on a PAGE serves its own html, so no page-relation dependencies are needed.
 func (p *Proxy) handleGetRaw(w http.ResponseWriter, r *http.Request) {
 	ref := chi.URLParam(r, "ref")
 	if !object.IsValidRef(ref) {
@@ -329,7 +419,12 @@ func (p *Proxy) handleGetRaw(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	serveRaw(w, r, p.store, ref, meta, found)
+	// Auth runs BEFORE the redirect (see Hub.handleGetRaw) so existence is never
+	// leaked for an unauthorized private object.
+	if rawVhostRedirect(w, r, p.Vhost, p.VhostMode, ref, meta) {
+		return
+	}
+	serveRaw(w, r, p.store, ref, meta, found, p.baseDomain())
 }
 
 // handleGetPage serves GET /{ref}/page in proxy mode.
