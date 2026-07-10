@@ -95,6 +95,16 @@ func serveJSON(w http.ResponseWriter, r *http.Request, store *storage.Store, ref
 // html). ETag/304 match GET /{ref}'s representation of the same bytes; see
 // rawETagSuffix for the exact suffixes and the deliberate page-relation
 // divergence.
+//
+// Fail-closed invariant: the serve decision must never outrun the INDEX meta
+// the security checks used. The caller's authorizeProjection (realm auth) and
+// rawVhostRedirect (origin isolation) both act on meta, so author-controlled
+// HTML may leave /raw only when that same meta said PAGE. On an index miss
+// (found=false — no realm auth was possible) or a meta/disk disagreement (a
+// stale BLOB meta chose the "-blob" ETag and skipped the redirect while disk
+// already holds a PAGE revision) the PAGE branch is skipped and the response
+// falls through to 409 NO_RAW. BLOB bytes carry no such gate: they are safe to
+// serve in either divergence direction.
 func serveRaw(w http.ResponseWriter, r *http.Request, store *storage.Store, ref string, meta object.ObjectMeta, found bool, baseDomain string) {
 	if found {
 		suffix, ok := rawETagSuffix(meta)
@@ -120,10 +130,13 @@ func serveRaw(w http.ResponseWriter, r *http.Request, store *storage.Store, ref 
 	}
 	// PAGE: its OWN html, injected with the base-domain meta like every other
 	// HTML-serving path (so it matches GET /{ref}'s HTML body exactly for the
-	// no-page-relation case, keeping the shared ETag honest).
-	if html := pageOwnHTML(data); html != "" {
-		writePageHTML(w, html, baseDomain)
-		return
+	// no-page-relation case, keeping the shared ETag honest). Gated on the
+	// INDEX meta — not just the disk bytes — per the fail-closed invariant above.
+	if found && meta.Type == "PAGE" {
+		if html := pageOwnHTML(data); html != "" {
+			writePageHTML(w, html, baseDomain)
+			return
+		}
 	}
 	writeError(w, r, http.StatusConflict, "object has no raw representation", "NO_RAW")
 }
