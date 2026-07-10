@@ -96,6 +96,43 @@ func TestProxyProjectionRaw(t *testing.T) {
 	resp.Body.Close()
 }
 
+// TestProxyProjectionRawPage: a PAGE projected via /raw through the proxy serves
+// its own html (synced from upstream, no page-relation deps needed), with ETag
+// parity against GET /{ref}'s HTML representation.
+func TestProxyProjectionRawPage(t *testing.T) {
+	proxySrv, rootSrv, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	// Store the PAGE only on the root — the proxy must sync it before serving.
+	pageData := loadTestFixture(t, "page.json")
+	pageRef := fixtureRef(t, "page.json")
+	if resp := doPut(t, rootSrv, pageRef, pageData); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT page to root failed: %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+
+	// Accept: application/json must be ignored — /raw serves the PAGE's own html.
+	resp := doGetWithAccept(t, proxySrv, "/"+pageRef+"/raw", "application/json")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected inline PAGE html, got: %s", body)
+	}
+
+	want := etagFor(t, proxySrv, "/"+pageRef, "text/html")
+	if got := resp.Header.Get("ETag"); got != want {
+		t.Errorf("proxy raw ETag %q != GET /{ref} HTML ETag %q", got, want)
+	}
+	assert304(t, proxySrv, "/"+pageRef+"/raw", want)
+}
+
 func TestProxyProjectionPageInline(t *testing.T) {
 	proxySrv, rootSrv, cleanup := testRootAndProxy(t)
 	defer cleanup()

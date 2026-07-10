@@ -108,6 +108,84 @@ func makePrivatePage(t *testing.T, priv *ecdsa.PrivateKey, pubkey, id string) (r
 	return pubkey + "." + id, buildSignedObject(t, priv, item)
 }
 
+// makePageWithPageRelation builds a signed PAGE that carries its OWN html AND a
+// `page` relation pointing at relTarget (so index.HasPageRelation is true even
+// though the object is itself a PAGE). GET /{ref}/raw must serve the PAGE's own
+// html — never the relation target — and use a non-colliding ETag suffix.
+func makePageWithPageRelation(t *testing.T, relTarget string) (ref string, data []byte) {
+	t.Helper()
+	priv, pubkey := testKeypair(t)
+	id := "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
+	item := map[string]any{
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-05T00:00:00Z",
+		"in":         []string{"dataverse001"},
+		"type":       "PAGE",
+		"content": map[string]any{
+			"title": "Own Page",
+			"html":  "<!DOCTYPE html><html><body><h1>OWN-PAGE-HTML</h1></body></html>",
+		},
+		"relations": map[string]any{
+			"page": []map[string]any{{"ref": relTarget}},
+		},
+	}
+	return pubkey + "." + id, buildSignedObject(t, priv, item)
+}
+
+// makeEmptyHTMLPage builds a signed PAGE whose content.html is empty — a
+// degenerate object with no raw representation (GET /{ref}/raw -> 409 NO_RAW).
+func makeEmptyHTMLPage(t *testing.T) (ref string, data []byte) {
+	t.Helper()
+	priv, pubkey := testKeypair(t)
+	id := "12121212-3434-4565-8787-909090909090"
+	item := map[string]any{
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-06T00:00:00Z",
+		"in":         []string{"dataverse001"},
+		"type":       "PAGE",
+		"content": map[string]any{
+			"title": "Empty",
+			"html":  "",
+		},
+	}
+	return pubkey + "." + id, buildSignedObject(t, priv, item)
+}
+
+// makeHTMLBlob builds a signed BLOB whose content.mime_type is text/html. It is
+// still a BLOB, so GET /{ref}/raw serves its bytes verbatim on the shared origin
+// — the /raw origin-isolation redirect keys on the OBJECT TYPE (PAGE), not on
+// content type (HTML-mime BLOBs are out of scope, tracked in issue #14).
+func makeHTMLBlob(t *testing.T) (ref string, data []byte) {
+	t.Helper()
+	priv, pubkey := testKeypair(t)
+	id := "abababab-cdcd-4e4e-8f8f-010101010101"
+	item := map[string]any{
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-07T00:00:00Z",
+		"in":         []string{"dataverse001"},
+		"type":       "BLOB",
+		"content": map[string]any{
+			"mime_type": "text/html",
+			"text":      "<html><body>RAW-HTML-BLOB</body></html>",
+		},
+	}
+	return pubkey + "." + id, buildSignedObject(t, priv, item)
+}
+
+// putOK PUTs a signed object and fails the test unless the hub returns 201.
+func putOK(t *testing.T, ts *httptest.Server, ref string, data []byte) {
+	t.Helper()
+	resp := doPut(t, ts, ref, data)
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT %s: expected 201, got %d: %s", ref, resp.StatusCode, body)
+	}
+	resp.Body.Close()
+}
+
 // fixtureRef returns the ref of a stored fixture.
 func fixtureRef(t *testing.T, name string) string {
 	t.Helper()
@@ -302,21 +380,134 @@ func TestProjectionRawTextBlob(t *testing.T) {
 	}
 }
 
-func TestProjectionRawNotABlob(t *testing.T) {
+// TestProjectionRawNoRawRepresentation covers objects with no native raw
+// representation: neither a BLOB (bytes) nor a PAGE (own html) -> 409 NO_RAW.
+// A PAGE is NOT included here — /raw now serves a PAGE's own html (see
+// TestProjectionRawPageInline).
+func TestProjectionRawNoRawRepresentation(t *testing.T) {
 	ts, cleanup := testHub(t)
 	defer cleanup()
 
 	putFixture(t, ts, "root.json")
 	rootRef := fixtureRef(t, "root.json")
+	putFixture(t, ts, "identity.json")
+	identityRef := fixtureRef(t, "identity.json")
+
+	for _, ref := range []string{rootRef, identityRef} {
+		resp := doGet(t, ts, "/"+ref+"/raw")
+		assertProblem(t, resp, http.StatusConflict, "NO_RAW")
+	}
+}
+
+// TestProjectionRawPageInline: a PAGE served via /raw returns its own
+// content.html as text/html, regardless of Accept. With no page relation, GET
+// /{ref}'s HTML representation is that same html, so the ETags match.
+func TestProjectionRawPageInline(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
 	putFixture(t, ts, "page.json")
 	pageRef := fixtureRef(t, "page.json")
 
-	for _, ref := range []string{rootRef, pageRef} {
-		resp := doGet(t, ts, "/"+ref+"/raw")
-		if resp.StatusCode != http.StatusConflict {
-			t.Errorf("raw on non-BLOB %s: expected 409, got %d", ref, resp.StatusCode)
-		}
-		resp.Body.Close()
+	// Accept: application/json must be ignored — /raw serves the PAGE's own html.
+	resp := doGetWithAccept(t, ts, "/"+pageRef+"/raw", "application/json")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("<h1>Hello Dataverse</h1>")) {
+		t.Errorf("expected inline PAGE html, got: %s", body)
+	}
+
+	// ETag parity: /raw shares GET /{ref}'s HTML ETag for an inline PAGE.
+	want := etagFor(t, ts, "/"+pageRef, "text/html")
+	if got := resp.Header.Get("ETag"); got != want {
+		t.Errorf("raw ETag %q != GET /{ref} HTML ETag %q", got, want)
+	}
+	assert304(t, ts, "/"+pageRef+"/raw", want)
+}
+
+// TestProjectionRawPageWithPageRelation: a PAGE that ALSO carries a page relation
+// still serves its OWN html via /raw (never the relation viewer — that stays
+// /page's job), and uses a distinct ETag suffix so it never collides with the
+// viewer ETag GET /{ref} may serve for text/html.
+func TestProjectionRawPageWithPageRelation(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	putFixture(t, ts, "page.json") // the page-relation target
+	ref, data := makePageWithPageRelation(t, pageFixtureRef)
+	putOK(t, ts, ref, data)
+
+	resp := doGetWithAccept(t, ts, "/"+ref+"/raw", "text/html")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("OWN-PAGE-HTML")) {
+		t.Errorf("/raw must serve the PAGE's own html, got: %s", body)
+	}
+	if bytes.Contains(body, []byte("Hello Dataverse")) {
+		t.Errorf("/raw must NOT follow the page relation to the target html")
+	}
+
+	rawETag := resp.Header.Get("ETag")
+	if !strings.HasSuffix(rawETag, `-raw"`) {
+		t.Errorf("/raw on page-relation PAGE: expected -raw ETag suffix, got %q", rawETag)
+	}
+	if viewerETag := etagFor(t, ts, "/"+ref, "text/html"); rawETag == viewerETag {
+		t.Errorf("/raw ETag %q must not collide with GET /{ref} HTML ETag %q", rawETag, viewerETag)
+	}
+	assert304(t, ts, "/"+ref+"/raw", rawETag)
+}
+
+// TestProjectionRawPageEmptyHTML: a degenerate PAGE with empty content.html has
+// no raw representation -> 409 NO_RAW.
+func TestProjectionRawPageEmptyHTML(t *testing.T) {
+	ts, cleanup := testHub(t)
+	defer cleanup()
+
+	ref, data := makeEmptyHTMLPage(t)
+	putOK(t, ts, ref, data)
+
+	resp := doGet(t, ts, "/"+ref+"/raw")
+	assertProblem(t, resp, http.StatusConflict, "NO_RAW")
+}
+
+// TestProjectionRawPagePrivate: a private PAGE via /raw is 404 unauthenticated
+// (existence not leaked) and serves its own html to the authenticated owner.
+func TestProjectionRawPagePrivate(t *testing.T) {
+	ts, _, cleanup := testHubWithAuth(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	id := "dddd7777-7777-4777-8777-777777777777"
+	ref, data := makePrivatePage(t, priv, pubkey, id)
+	putOK(t, ts, ref, data)
+
+	resp := doGet(t, ts, "/"+ref+"/raw")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unauth raw page: expected 404, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	token := authenticateAs(t, ts, priv, pubkey)
+	resp = doGetWithToken(t, ts, "/"+ref+"/raw", token)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("auth raw page: expected 200, got %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/html; charset=utf-8" {
+		t.Errorf("expected text/html, got %q", ct)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(body, []byte("SECRET-PAGE")) {
+		t.Errorf("auth raw page: expected own html, got %s", body)
 	}
 }
 
