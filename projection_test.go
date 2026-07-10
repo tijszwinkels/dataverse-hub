@@ -186,6 +186,29 @@ func putOK(t *testing.T, ts *httptest.Server, ref string, data []byte) {
 	resp.Body.Close()
 }
 
+// testHubBackdoor creates a Hub and returns direct handles to its store and
+// index, so tests can simulate store/index divergence (index miss, stale meta
+// mid-revision-update) that cannot be produced through the HTTP API.
+func testHubBackdoor(t *testing.T) (*httptest.Server, *storage.Store, *storage.Index, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	store, err := storage.NewStore(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := realm.NewSharedRealms()
+	index := storage.NewIndex(shared)
+	limiter := auth.NewRateLimiter(1000, 100000)
+	au := auth.NewAuthStore(168 * time.Hour)
+	hub := serving.NewHub(store, index, limiter, au, "", shared)
+	ts := httptest.NewServer(hub.Router())
+	return ts, store, index, func() {
+		ts.Close()
+		limiter.Stop()
+		au.Stop()
+	}
+}
+
 // fixtureRef returns the ref of a stored fixture.
 func fixtureRef(t *testing.T, name string) string {
 	t.Helper()
@@ -509,6 +532,106 @@ func TestProjectionRawPagePrivate(t *testing.T) {
 	if !bytes.Contains(body, []byte("SECRET-PAGE")) {
 		t.Errorf("auth raw page: expected own html, got %s", body)
 	}
+}
+
+// TestProjectionRawIndexMissPageFailsClosed: /raw's serve decision must never
+// outrun the meta the security checks used. On an index miss (found=false),
+// authorizeProjection cannot evaluate realm auth (the realms live in the index)
+// and rawVhostRedirect cannot fire — so a PAGE that exists only on disk must
+// NEVER leave /raw as HTML, not even to its owner. Fail closed: 409 NO_RAW.
+// The PAGE here is private (identity-realm) and the request unauthenticated,
+// making the leak this guards against concrete.
+func TestProjectionRawIndexMissPageFailsClosed(t *testing.T) {
+	ts, store, _, cleanup := testHubBackdoor(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	ref, data := makePrivatePage(t, priv, pubkey, "eeee8888-8888-4888-8888-888888888888")
+	// Write to disk WITHOUT updating the index — the index-miss race.
+	if err := store.Write(ref, data, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Even an HTML-accepting client must not receive the html.
+	resp := doGetWithAccept(t, ts, "/"+ref+"/raw", "text/html")
+	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("index-miss PAGE served as HTML on /raw (Content-Type %q): %s", ct, body)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("expected 409, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A JSON-accepting client gets the structured NO_RAW problem.
+	assertProblem(t, doGet(t, ts, "/"+ref+"/raw"), http.StatusConflict, "NO_RAW")
+}
+
+// TestProjectionRawStaleBlobMetaPageOnDisk: stale index mid BLOB→PAGE revision
+// update. The index still says BLOB — so rawETagSuffix chose "-blob" and
+// rawVhostRedirect did NOT fire — while the store already holds the new PAGE
+// revision. Serving that PAGE's html would put author-controlled HTML on the
+// shared origin with the redirect bypassed; /raw must fail closed: 409 NO_RAW,
+// never text/html.
+func TestProjectionRawStaleBlobMetaPageOnDisk(t *testing.T) {
+	ts, store, index, cleanup := testHubBackdoor(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	id := "ffff9999-aaaa-4bbb-8ccc-dddddddddddd"
+	ref := pubkey + "." + id
+
+	// Index: the old BLOB revision (what the auth/redirect checks will see).
+	blobData := buildSignedObject(t, priv, map[string]any{
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-08T00:00:00Z",
+		"in":         []string{"dataverse001"},
+		"type":       "BLOB",
+		"revision":   1,
+		"content": map[string]any{
+			"mime_type": "text/plain",
+			"text":      "old blob revision",
+		},
+	})
+	blobEnv, blobItem, err := object.ParseEnvelope(blobData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index.Update(ref, blobItem, time.Now(), object.ResolveIn(blobEnv, blobItem))
+
+	// Disk: the new PAGE revision (index not yet updated).
+	pageData := buildSignedObject(t, priv, map[string]any{
+		"id":         id,
+		"pubkey":     pubkey,
+		"created_at": "2026-03-08T00:01:00Z",
+		"in":         []string{"dataverse001"},
+		"type":       "PAGE",
+		"revision":   2,
+		"content": map[string]any{
+			"title": "Race Page",
+			"html":  "<!DOCTYPE html><html><body><h1>STALE-RACE-PAGE</h1></body></html>",
+		},
+	})
+	if err := store.Write(ref, pageData, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Even an HTML-accepting client must not receive the html.
+	resp := doGetWithAccept(t, ts, "/"+ref+"/raw", "text/html")
+	if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/html") {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("stale-BLOB-meta PAGE served as HTML on /raw (Content-Type %q): %s", ct, body)
+	}
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("expected 409, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// A JSON-accepting client gets the structured NO_RAW problem.
+	assertProblem(t, doGet(t, ts, "/"+ref+"/raw"), http.StatusConflict, "NO_RAW")
 }
 
 func TestProjectionRawPrivate(t *testing.T) {
