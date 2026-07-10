@@ -376,6 +376,26 @@ func resolveRootTarget(w http.ResponseWriter, r *http.Request, index *storage.In
 		return "", true
 	}
 	if normalizeVhostMode(vhostMode) == VhostModeRedirect {
+		// Auth-gate the redirect: the Location carries the resolved ref, and for
+		// a PRIVATE page that discloses existence AND the owner-pubkey ref behind
+		// a one-way hash-host. Mirror the projection contract: an unauthorized
+		// private object gets a non-disclosing 404, byte-identical to a
+		// nonexistent ref. Public objects and authorized callers (bearer auth is
+		// host-independent) redirect as before. An index miss (found=false) also
+		// redirects: the ref cannot be confirmed private, and GET /'s
+		// redirect-mode behavior stays the baseline.
+		//
+		// Deliberate divergence from handleRoot's GET /: the bare-root redirect
+		// stays un-gated because browsers rely on that early 302 to reach the
+		// base-domain login flow (the dv_session cookie is host-only, so a page
+		// host can never authenticate the browser directly). That pre-existing
+		// disclosure is tracked separately (see PR #17 comments).
+		if meta, found := index.GetMeta(resolved); found && !meta.IsPublic {
+			if !realm.CanRead(meta.Realms, auth.AuthPubkey(r), index.Resolver()) {
+				writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
+				return "", true
+			}
+		}
 		http.Redirect(w, r, pageRedirectTargetPath(vhostMode, resolver, r, resolved, resolved, pathSuffix), http.StatusFound)
 		return "", true
 	}
