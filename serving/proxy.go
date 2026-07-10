@@ -93,6 +93,9 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/{ref}", p.handleGetObject)
 	r.Put("/{ref}", p.handlePutObject)
 	r.Get("/{ref}/inbound", p.handleInbound)
+	r.Get("/{ref}/json", p.handleGetJSON)
+	r.Get("/{ref}/raw", p.handleGetRaw)
+	r.Get("/{ref}/page", p.handleGetPage)
 
 	return r
 }
@@ -178,15 +181,32 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build upstream request — ETag reflects our cache state, not the client's
+	// clientETag reflects the client's cache; the upstream sync uses OUR cache
+	// state instead (see syncFromUpstream). Serving HTML also needs page deps.
 	clientETag := r.Header.Get("If-None-Match")
+	if !p.syncFromUpstream(w, r, ref, acceptsHTML(r)) {
+		return
+	}
+	p.serveFromLocalCache(w, r, ref, clientETag)
+}
+
+// syncFromUpstream refreshes the local cache for ref from upstream, then
+// optionally its page-relation / default-viewer dependencies (needed only when
+// an HTML representation may be served). It returns ok=true when the caller
+// should proceed to serve from the local cache, and ok=false when it has
+// already written a terminal response (404 for a missing object, a forwarded
+// non-gateway upstream error, or a 500). On a transient upstream failure
+// (unreachable or gateway-down) it returns ok=true so the caller falls back to
+// the local cache. The upstream conditional request uses OUR cached revision,
+// never the client's ETag.
+func (p *Proxy) syncFromUpstream(w http.ResponseWriter, r *http.Request, ref string, syncPageDeps bool) bool {
 	upstreamETag := p.buildUpstreamETag(ref)
 
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: GET /%s: build request: %v", ref, err)
 		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
-		return
+		return false
 	}
 	upstreamReq.Header.Set("Accept", "application/json")
 	if upstreamETag != "" {
@@ -197,8 +217,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Upstream unreachable — fall back to local cache
 		log.Printf("[proxy] WARN: GET /%s: upstream unreachable, serving from cache", ref)
-		p.serveFromLocalCache(w, r, ref, clientETag)
-		return
+		return true
 	}
 	defer resp.Body.Close()
 
@@ -212,7 +231,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("[proxy] ERROR: GET /%s: read upstream body: %v", ref, err)
 			writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
-			return
+			return false
 		}
 		p.CacheLocally(ref, body)
 
@@ -220,7 +239,7 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		localData, _ := p.store.Read(ref)
 		if localData == nil {
 			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
-			return
+			return false
 		}
 		log.Printf("[proxy] GET /%s: upstream 404 but found locally, serving + pushing", ref)
 		go p.pushToUpstream(ref, localData)
@@ -229,23 +248,20 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		if upstream.IsDown(resp.StatusCode) {
 			log.Printf("[proxy] WARN: GET /%s: upstream returned %d, falling back to cache", ref, resp.StatusCode)
 			io.Copy(io.Discard, resp.Body)
-			p.serveFromLocalCache(w, r, ref, clientETag)
-			return
+			return true
 		}
 		// Forward non-gateway upstream error (4xx, etc.), preserving its
 		// Content-Type so an upgraded upstream's problem+json passes through.
 		body, _ := io.ReadAll(resp.Body)
 		forwardResponse(w, r, resp, body)
-		return
+		return false
 	}
 
-	// Phase 2: Sync page dependencies (if serving HTML)
-	if acceptsHTML(r) {
+	// Phase 2: Sync page dependencies (if an HTML representation may be served)
+	if syncPageDeps {
 		p.ensurePageDepsFresh(ref)
 	}
-
-	// Phase 3: Serve from local cache (no more upstream calls)
-	p.serveFromLocalCache(w, r, ref, clientETag)
+	return true
 }
 
 // handlePutObject proxies PUT /{ref} with local signature verification.
