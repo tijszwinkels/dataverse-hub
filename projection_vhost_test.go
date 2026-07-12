@@ -6,55 +6,18 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
-	"time"
 
-	"github.com/tijszwinkels/dataverse-hub/auth"
-	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
-	"github.com/tijszwinkels/dataverse-hub/storage"
-	"github.com/tijszwinkels/dataverse-hub/upstream"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
 )
 
 // testRootAndVhostProxy builds a root hub + an isolate-mode vhost proxy pointing
-// at it. Returns the proxy server and cleanup.
+// at it. Returns the proxy server and cleanup. See testRootAndVhostProxyMode for
+// the mode-parameterized variant.
 func testRootAndVhostProxy(t *testing.T, baseDomain string) (*httptest.Server, func()) {
 	t.Helper()
-
-	rootDir := t.TempDir()
-	rootStore, _ := storage.NewStore(rootDir, true)
-	rootShared := realm.NewSharedRealms()
-	rootIndex := storage.NewIndex(rootShared)
-	rootLimiter := auth.NewRateLimiter(10000, 1000000)
-	rootAuth := auth.NewAuthStore(168 * time.Hour)
-	rootHub := serving.NewHub(rootStore, rootIndex, rootLimiter, rootAuth, "", rootShared)
-	rootSrv := httptest.NewServer(rootHub.Router())
-
-	proxyDir := t.TempDir()
-	proxyStore, _ := storage.NewStore(proxyDir, true)
-	proxyShared := realm.NewSharedRealms()
-	proxyIndex := storage.NewIndex(proxyShared)
-	proxyLimiter := auth.NewRateLimiter(10000, 1000000)
-	proxyAuth := auth.NewAuthStore(168 * time.Hour)
-	up := upstream.NewClient(rootSrv.URL)
-	pending := upstream.NewSyncPending(filepath.Join(proxyDir, "sync_pending"), up, proxyStore, proxyIndex)
-	proxy := serving.NewProxy(proxyStore, proxyIndex, proxyLimiter, proxyAuth, "", up, pending, proxyShared)
-
-	dns := func(host string) ([]string, error) { return nil, fmt.Errorf("no such host") }
-	proxy.Vhost = vhost.NewResolver(baseDomain, 5*time.Minute, dns)
-	proxy.VhostMode = serving.VhostModeIsolate
-
-	proxySrv := httptest.NewServer(proxy.Router())
-	return proxySrv, func() {
-		proxySrv.Close()
-		rootSrv.Close()
-		rootLimiter.Stop()
-		proxyLimiter.Stop()
-		rootAuth.Stop()
-		proxyAuth.Stop()
-	}
+	return testRootAndVhostProxyMode(t, baseDomain, serving.VhostModeIsolate)
 }
 
 // GET /{ref}/page must honor per-app origin isolation exactly like GET /{ref}:

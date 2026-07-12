@@ -62,6 +62,12 @@ func (h *Hub) Router() http.Handler {
 
 	r.Get("/ask", TLSAskHandler(h.Vhost))
 	r.Get("/", h.handleRoot)
+	// Root representation aliases: the representation of whatever GET / resolves
+	// to on this host, served directly (see resolveRootTarget). Static routes,
+	// so they take precedence over /{ref} (refs are pubkey.uuid, never bare words).
+	r.Get("/json", h.handleRootJSON)
+	r.Get("/raw", h.handleRootRaw)
+	r.Get("/page", h.handleRootPage)
 	r.Get("/search", h.handleListObjects)
 	r.Get("/{ref}", h.handleGetObject)
 	r.Put("/{ref}", h.handlePutObject)

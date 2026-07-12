@@ -340,11 +340,98 @@ func writeBlobBytes(w http.ResponseWriter, mimeType string, raw []byte) {
 	w.Write(raw)
 }
 
+// --- Root representation aliases ---
+//
+// GET /json, /raw, /page serve the representation of whatever GET / resolves to
+// on this host — DIRECTLY (200), not via a redirect. This powers a redirect-less
+// agent bootstrap ("GET https://dataverse001.net/json …"): the dumbest client
+// must succeed without following a 302. resolveRootTarget mirrors handleRoot's
+// host resolution exactly, then the alias delegates to the identical
+// /{ref}/<repr> pipeline via serve<Repr>ForRef.
+
+// resolveRootTarget resolves the ref that GET / serves on this host, for a root
+// representation alias. It mirrors handleRoot / handleRootLegacy:
+//   - Vhost==nil, or a request to the base domain → the ROOT object's ref (the
+//     same ref handleRootLegacy redirects to). The caller serves it directly.
+//   - a vhost page-host in isolate mode → the resolved page ref.
+//   - a vhost page-host in VhostModeRedirect → a 302 to the base domain, mirroring
+//     handleRoot, but with pathSuffix (/json, /raw, /page) appended so the
+//     representation survives the redirect; handled=true.
+//   - an unknown host → 404 NOT_FOUND; handled=true.
+//   - no ROOT object present → 404 NOT_FOUND; handled=true.
+//
+// When handled=true a terminal response is already written and the caller must
+// stop. Otherwise ref is the target and the caller runs the full /{ref}/<repr>
+// pipeline (auth, ETag/304, vhost redirect, projection) unchanged.
+func resolveRootTarget(w http.ResponseWriter, r *http.Request, index *storage.Index, resolver *vhost.Resolver, vhostMode, pathSuffix string) (ref string, handled bool) {
+	if resolver == nil {
+		return rootObjectRef(w, r, index)
+	}
+	resolved := resolver.Resolve(r.Host)
+	if resolved == "" {
+		if baseHostMatches(r.Host, resolver.BaseDomain()) {
+			return rootObjectRef(w, r, index)
+		}
+		writeError(w, r, http.StatusNotFound, "unknown host", "NOT_FOUND")
+		return "", true
+	}
+	if normalizeVhostMode(vhostMode) == VhostModeRedirect {
+		// Auth-gate the redirect: the Location carries the resolved ref, and for
+		// a PRIVATE page that discloses existence AND the owner-pubkey ref behind
+		// a one-way hash-host. Mirror the projection contract: an unauthorized
+		// private object gets a non-disclosing 404, byte-identical to a
+		// nonexistent ref. Public objects and authorized callers (bearer auth is
+		// host-independent) redirect as before. An index miss (found=false) also
+		// redirects: the ref cannot be confirmed private, and GET /'s
+		// redirect-mode behavior stays the baseline.
+		//
+		// Deliberate divergence from handleRoot's GET /: the bare-root redirect
+		// stays un-gated because browsers rely on that early 302 to reach the
+		// base-domain login flow (the dv_session cookie is host-only, so a page
+		// host can never authenticate the browser directly). That pre-existing
+		// disclosure is tracked separately (see PR #17 comments).
+		if meta, found := index.GetMeta(resolved); found && !meta.IsPublic {
+			if !realm.CanRead(meta.Realms, auth.AuthPubkey(r), index.Resolver()) {
+				writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
+				return "", true
+			}
+		}
+		http.Redirect(w, r, pageRedirectTargetPath(vhostMode, resolver, r, resolved, resolved, pathSuffix), http.StatusFound)
+		return "", true
+	}
+	return resolved, false
+}
+
+// rootObjectRef returns the ROOT object's ref — the same ref handleRootLegacy
+// redirects GET / to — or writes 404 NOT_FOUND (handled=true) when there is no
+// ROOT object.
+func rootObjectRef(w http.ResponseWriter, r *http.Request, index *storage.Index) (ref string, handled bool) {
+	metas := index.GetAll("", "ROOT", "", false)
+	if len(metas) == 0 {
+		writeError(w, r, http.StatusNotFound, "no root object", "NOT_FOUND")
+		return "", true
+	}
+	return metas[0].Ref, false
+}
+
 // --- Hub handlers ---
 
 // handleGetJSON serves GET /{ref}/json.
 func (h *Hub) handleGetJSON(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	h.serveJSONForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootJSON serves GET /json — the JSON envelope of GET /'s target.
+func (h *Hub) handleRootJSON(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, h.index, h.Vhost, h.VhostMode, "/json")
+	if handled {
+		return
+	}
+	h.serveJSONForRef(w, r, ref)
+}
+
+// serveJSONForRef runs the /{ref}/json pipeline for an explicit ref.
+func (h *Hub) serveJSONForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
@@ -358,7 +445,20 @@ func (h *Hub) handleGetJSON(w http.ResponseWriter, r *http.Request) {
 
 // handleGetRaw serves GET /{ref}/raw.
 func (h *Hub) handleGetRaw(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	h.serveRawForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootRaw serves GET /raw — the native content of GET /'s target.
+func (h *Hub) handleRootRaw(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, h.index, h.Vhost, h.VhostMode, "/raw")
+	if handled {
+		return
+	}
+	h.serveRawForRef(w, r, ref)
+}
+
+// serveRawForRef runs the /{ref}/raw pipeline for an explicit ref.
+func (h *Hub) serveRawForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
@@ -377,7 +477,20 @@ func (h *Hub) handleGetRaw(w http.ResponseWriter, r *http.Request) {
 
 // handleGetPage serves GET /{ref}/page.
 func (h *Hub) handleGetPage(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	h.servePageForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootPage serves GET /page — the HTML view of GET /'s target.
+func (h *Hub) handleRootPage(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, h.index, h.Vhost, h.VhostMode, "/page")
+	if handled {
+		return
+	}
+	h.servePageForRef(w, r, ref)
+}
+
+// servePageForRef runs the /{ref}/page pipeline for an explicit ref.
+func (h *Hub) servePageForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
@@ -402,7 +515,20 @@ func (h *Hub) handleGetPage(w http.ResponseWriter, r *http.Request) {
 
 // handleGetJSON serves GET /{ref}/json in proxy mode.
 func (p *Proxy) handleGetJSON(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	p.serveJSONForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootJSON serves GET /json — the JSON envelope of GET /'s target.
+func (p *Proxy) handleRootJSON(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, p.index, p.Vhost, p.VhostMode, "/json")
+	if handled {
+		return
+	}
+	p.serveJSONForRef(w, r, ref)
+}
+
+// serveJSONForRef runs the /{ref}/json proxy pipeline for an explicit ref.
+func (p *Proxy) serveJSONForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
@@ -420,7 +546,20 @@ func (p *Proxy) handleGetJSON(w http.ResponseWriter, r *http.Request) {
 // handleGetRaw serves GET /{ref}/raw in proxy mode. syncPageDeps stays false:
 // /raw on a PAGE serves its own html, so no page-relation dependencies are needed.
 func (p *Proxy) handleGetRaw(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	p.serveRawForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootRaw serves GET /raw — the native content of GET /'s target.
+func (p *Proxy) handleRootRaw(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, p.index, p.Vhost, p.VhostMode, "/raw")
+	if handled {
+		return
+	}
+	p.serveRawForRef(w, r, ref)
+}
+
+// serveRawForRef runs the /{ref}/raw proxy pipeline for an explicit ref.
+func (p *Proxy) serveRawForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
@@ -442,7 +581,20 @@ func (p *Proxy) handleGetRaw(w http.ResponseWriter, r *http.Request) {
 
 // handleGetPage serves GET /{ref}/page in proxy mode.
 func (p *Proxy) handleGetPage(w http.ResponseWriter, r *http.Request) {
-	ref := chi.URLParam(r, "ref")
+	p.servePageForRef(w, r, chi.URLParam(r, "ref"))
+}
+
+// handleRootPage serves GET /page — the HTML view of GET /'s target.
+func (p *Proxy) handleRootPage(w http.ResponseWriter, r *http.Request) {
+	ref, handled := resolveRootTarget(w, r, p.index, p.Vhost, p.VhostMode, "/page")
+	if handled {
+		return
+	}
+	p.servePageForRef(w, r, ref)
+}
+
+// servePageForRef runs the /{ref}/page proxy pipeline for an explicit ref.
+func (p *Proxy) servePageForRef(w http.ResponseWriter, r *http.Request, ref string) {
 	if !object.IsValidRef(ref) {
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return

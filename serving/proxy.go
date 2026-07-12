@@ -89,6 +89,10 @@ func (p *Proxy) Router() http.Handler {
 
 	r.Get("/ask", TLSAskHandler(p.Vhost))
 	r.Get("/", p.handleRoot)
+	// Root representation aliases (see resolveRootTarget / Hub.Router).
+	r.Get("/json", p.handleRootJSON)
+	r.Get("/raw", p.handleRootRaw)
+	r.Get("/page", p.handleRootPage)
 	r.Get("/search", p.handleSearch)
 	r.Get("/{ref}", p.handleGetObject)
 	r.Put("/{ref}", p.handlePutObject)

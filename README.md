@@ -102,6 +102,9 @@ GET /{ref}/json         # signed JSON envelope, always (ignores Accept)
 GET /{ref}/raw          # the object's native content (ignores Accept)
 GET /{ref}/page         # HTML view: inline PAGE, page-relation viewer, or default viewer
 GET /{ref}/inbound      # objects pointing at this ref
+GET /json               # the /json representation of whatever GET / resolves to
+GET /raw                # the /raw representation of whatever GET / resolves to
+GET /page               # the /page representation of whatever GET / resolves to
 GET /search             # list/filter objects
 ```
 
@@ -124,6 +127,18 @@ Each suffix shares `GET /{ref}`'s realm auth (an unauthorized private object
 returns `404`, not `403`, to avoid leaking existence) and, where the bytes
 coincide, its `ETag`/`If-None-Match` semantics so a client can revalidate either
 URL interchangeably.
+
+**Root aliases.** `GET /json`, `GET /raw`, and `GET /page` (no ref) each serve
+*the representation of whatever `GET /` resolves to on this host* — the
+genesis/root object on the base domain, or the resolved PAGE on a vhost page
+host. Unlike `GET /` (which `302`s to the root object), the aliases serve that
+target **directly** with `200`, so a redirect-less client can bootstrap with a
+single request (e.g. `curl https://dataverse001.net/json`). They then run the
+exact same pipeline as `/{ref}/<repr>`, so `/raw` on the base domain is `409
+NO_RAW` (the root object is neither BLOB nor PAGE) and `/page` composes the
+default viewer. In `redirect` vhost mode a page host `302`s to the base domain
+with the representation suffix preserved (`…/{ref}/json`); an unknown host is
+`404`.
 
 Query parameters for list endpoints:
 - `by={pubkey}` — filter by author
