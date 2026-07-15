@@ -100,7 +100,7 @@ Objects are identified by composite key: `{pubkey}.{id}`.
 GET /{ref}              # single object (JSON or HTML based on Accept header)
 GET /{ref}/json         # signed JSON envelope, always (ignores Accept)
 GET /{ref}/raw          # the object's native content (ignores Accept)
-GET /{ref}/page         # HTML view: inline PAGE, page-relation viewer, or default viewer
+GET /{ref}/page         # HTML view: inline, direct, TYPE-inherited, or Hub default viewer
 GET /{ref}/inbound      # objects pointing at this ref
 GET /json               # the /json representation of whatever GET / resolves to
 GET /raw                # the /raw representation of whatever GET / resolves to
@@ -121,7 +121,11 @@ suffixes pin one representation regardless of `Accept`:
   gets the same per-app origin-isolation redirect as `/page` (keyed on the object
   being a PAGE). HTML-mime BLOBs are intentionally still served on the shared
   origin (issue #14).
-- **`/page`** — `409 NO_PAGE` when there is no HTML view.
+- **`/page`** — resolves an inline PAGE first, then the object's direct `page`
+  relation, then the `page` relation on its `type_def` TYPE, and finally the
+  configured Hub-wide default viewer. It returns `409 NO_PAGE` when none is
+  usable. TYPE resolution is one bounded hop; missing, malformed, inaccessible,
+  or non-PAGE dependencies are skipped safely.
 
 Each suffix shares `GET /{ref}`'s realm auth (an unauthorized private object
 returns `404`, not `403`, to avoid leaking existence) and, where the bytes
@@ -280,7 +284,8 @@ Use this for data that should be publicly accessible on your hub but not spread 
 ### Content negotiation
 
 - `Accept: application/json` — always returns JSON
-- `Accept: text/html` — PAGE objects served as HTML; other objects rendered via default viewer
+- `Accept: text/html` — resolves inline PAGE, direct `page`, and TYPE-inherited
+  `page` viewers before raw BLOB negotiation and the Hub-wide default viewer
 - BLOB objects (`type: BLOB`) — served as raw content when Accept matches `content.mime_type`. Supports both binary (base64-encoded `content.data`) and text (`content.text`) BLOBs.
 
 ### Error responses
