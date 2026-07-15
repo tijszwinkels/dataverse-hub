@@ -151,7 +151,7 @@ func (p *Proxy) handleRoot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "page not found", "NOT_FOUND")
 			return
 		}
-		html := p.resolvePageHTML(resolved, data)
+		html := pageOwnHTML(data)
 		if html == "" {
 			writeError(w, r, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
 			return
@@ -185,13 +185,12 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// clientETag reflects the client's cache; the upstream sync uses OUR cache
-	// state instead (see syncFromUpstream). Serving HTML also needs page deps.
-	clientETag := r.Header.Get("If-None-Match")
+	// The upstream sync uses OUR cache state, independent of the client's ETag.
+	// Serving HTML also refreshes viewer dependencies before local selection.
 	if !p.syncFromUpstream(w, r, ref, acceptsHTML(r)) {
 		return
 	}
-	p.serveFromLocalCache(w, r, ref, clientETag)
+	p.serveFromLocalCache(w, r, ref)
 }
 
 // syncFromUpstream refreshes the local cache for ref from upstream, then
@@ -785,8 +784,25 @@ func (p *Proxy) ensureFresh(ref string) {
 	}
 }
 
-// ensurePageDepsFresh syncs the page-related objects that may be needed for
-// HTML rendering. Must be called BEFORE the serve phase.
+// ensureViewerDependencyFresh refreshes globally replicated dependencies but
+// leaves private/server-local viewer objects under the proxy's local authority.
+// In particular, an upstream 404 must never cause a private viewer to be pushed.
+func (p *Proxy) ensureViewerDependencyFresh(ref string) {
+	if meta, found := p.index.GetMeta(ref); found {
+		if !realm.IsGlobalObject(object.InField(meta.Realms)) {
+			return
+		}
+	} else if data, err := p.store.Read(ref); err == nil && data != nil {
+		if env, item, err := object.ParseEnvelope(data); err == nil && !realm.IsGlobalObject(object.ResolveIn(env, item)) {
+			return
+		}
+	}
+	p.ensureFresh(ref)
+}
+
+// ensurePageDepsFresh syncs every bounded dependency that may participate in
+// HTML selection: direct PAGE, one TYPE hop plus its PAGE, and the configured
+// generic viewer. It never recursively follows type_def.
 func (p *Proxy) ensurePageDepsFresh(ref string) {
 	data, err := p.store.Read(ref)
 	if err != nil || data == nil {
@@ -802,20 +818,34 @@ func (p *Proxy) ensurePageDepsFresh(ref string) {
 		return
 	}
 
-	// Has a page relation — sync that ref
-	if pageRels, ok := item.Relations["page"]; ok && len(pageRels) > 0 {
-		var rel object.RelationRef
-		if json.Unmarshal(pageRels[0], &rel) == nil && rel.Ref != "" {
-			p.ensureFresh(rel.Ref)
-			return
+	if pageRef := firstRelationRef(item, "page", ref); pageRef != "" && pageRef != ref {
+		p.ensureViewerDependencyFresh(pageRef)
+	}
+
+	if typeRef := firstRelationRef(item, "type_def", ref); typeRef != "" && typeRef != ref {
+		p.ensureViewerDependencyFresh(typeRef)
+		typeData, err := p.store.Read(typeRef)
+		if err == nil && typeData != nil {
+			_, typeItem, err := object.ParseEnvelope(typeData)
+			if err == nil && typeItem.Type == "TYPE" {
+				if pageRef := firstRelationRef(typeItem, "page", typeRef); pageRef != "" && pageRef != ref && pageRef != typeRef {
+					p.ensureViewerDependencyFresh(pageRef)
+				}
+			}
 		}
 	}
 
-	// No page relation — try default viewer
 	if p.defaultViewerRef != "" && ref != p.defaultViewerRef {
-		p.ensureFresh(p.defaultViewerRef)
-		// Default viewer may itself have a page relation
-		p.ensurePageDepsFresh(p.defaultViewerRef)
+		p.ensureViewerDependencyFresh(p.defaultViewerRef)
+		defaultData, err := p.store.Read(p.defaultViewerRef)
+		if err == nil && defaultData != nil {
+			_, defaultItem, err := object.ParseEnvelope(defaultData)
+			if err == nil && defaultItem.Type != "PAGE" {
+				if pageRef := firstRelationRef(defaultItem, "page", p.defaultViewerRef); pageRef != "" && pageRef != ref && pageRef != p.defaultViewerRef {
+					p.ensureViewerDependencyFresh(pageRef)
+				}
+			}
+		}
 	}
 }
 
@@ -834,7 +864,7 @@ func (p *Proxy) buildUpstreamETag(ref string) string {
 }
 
 // serveFromLocalCache reads from local store and serves with content negotiation.
-func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref string, clientETag string) {
+func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref string) {
 	meta, found := p.index.GetMeta(ref)
 	if !found {
 		data, err := p.store.Read(ref)
@@ -850,71 +880,23 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
 		if !realm.CanRead(meta.Realms, authPK, p.index.Resolver()) {
-			if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
-				pageRef := ref
-				if meta.HasPageRelation && meta.PageRef != "" {
-					pageRef = meta.PageRef
-				}
-				if !canonicalPageHost(p.VhostMode, p.Vhost, r.Host, pageRef) {
-					target := pageRedirectTarget(p.VhostMode, p.Vhost, r, ref, pageRef)
-					if r.URL.RawQuery != "" {
-						target += "?" + r.URL.RawQuery
-					}
-					http.Redirect(w, r, target, http.StatusFound)
+			if data, err := p.store.Read(ref); err == nil && data != nil {
+				resolver := newViewerResolver(p.store, p.index, ref, data, authPK)
+				if servePrivateViewerLogin(w, r, resolver, p.Vhost, p.VhostMode, ref) {
 					return
 				}
-				servePrivatePageLogin(w)
-				return
 			}
 			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 	}
-
-	// Build ETag and check 304 (same logic as Hub.handleGetObject). Precedence:
-	//   1. PAGE / page-relation viewer — for HTML-accepting clients only.
-	//   2. raw BLOB content negotiation — curl, */*, or a BLOB with no page relation.
-	//   3. generic default viewer — for HTML-accepting clients; never pre-empts a raw BLOB.
-	// This mirrors serveObjectData's body decision so the ETag matches what is served.
-	etag := `"` + strconv.Itoa(meta.Revision) + `"`
-	isHTML := false
-	isBlob := false
-	switch {
-	case acceptsHTML(r) && pageViewable(p.index, meta):
-		isHTML = true
-	case meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType):
-		isBlob = true
-	case acceptsHTML(r) && p.defaultViewerRef != "" && ref != p.defaultViewerRef:
-		isHTML = true
-	}
-	if isHTML {
-		etag = etag[:len(etag)-1] + pageETagSuffix(p.index, meta, p.defaultViewerRef) + `"`
-	} else if isBlob {
-		etag = etag[:len(etag)-1] + `-blob"`
-	}
-
-	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
-	if p.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
-		pageRef := ref
-		if meta.HasPageRelation && meta.PageRef != "" {
-			pageRef = meta.PageRef
-		}
-		if !canonicalPageHost(p.VhostMode, p.Vhost, r.Host, pageRef) {
-			target := pageRedirectTarget(p.VhostMode, p.Vhost, r, ref, pageRef)
-			if r.URL.RawQuery != "" {
-				target += "?" + r.URL.RawQuery
-			}
-			http.Redirect(w, r, target, http.StatusFound)
+	if etag, ok := indexedNonHTMLValidator(r, meta); ok {
+		w.Header().Set("Vary", "Accept")
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
 			return
 		}
-	}
-
-	w.Header().Set("Vary", "Accept")
-	w.Header().Set("ETag", etag)
-
-	if clientETag == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
 	}
 
 	data, err := p.store.Read(ref)
@@ -925,100 +907,29 @@ func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref 
 	p.serveObjectData(w, r, ref, data)
 }
 
-// serveObjectData writes the response body with content negotiation.
+// serveObjectData selects, validates, and writes GET /{ref}'s representation.
 func (p *Proxy) serveObjectData(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
-	// Set ETag from the data if not already set
-	if w.Header().Get("ETag") == "" {
-		_, item, err := object.ParseEnvelope(data)
-		if err == nil {
-			etag := `"` + strconv.Itoa(item.Revision) + `"`
-			if acceptsHTML(r) {
-				if meta, found := p.index.GetMeta(ref); found {
-					etag = etag[:len(etag)-1] + pageETagSuffix(p.index, meta, p.defaultViewerRef) + `"`
-				} else {
-					etag = etag[:len(etag)-1] + `-html"`
-				}
-			}
-			w.Header().Set("Vary", "Accept")
-			w.Header().Set("ETag", etag)
-		}
-	}
-
-	// A real page relation or inline PAGE renders the viewer for HTML-accepting
-	// clients, taking priority over raw BLOB serving — this is what lets a browser
-	// open a BLOB and see its attached viewer instead of raw bytes. The generic
-	// default viewer does NOT pre-empt a raw BLOB (it runs after serveBlob), so a
-	// BLOB with no page relation still serves its raw bytes to browsers. Non-HTML
-	// clients (curl's */*, application/json) never enter the acceptsHTML branches,
-	// so they keep their raw-BLOB / JSON-envelope behavior unchanged.
-	if acceptsHTML(r) {
-		if html := p.resolvePageHTML(ref, data); html != "" {
-			writePageHTML(w, html, p.baseDomain())
-			return
-		}
-	}
-
-	if serveBlob(w, r, data) {
-		return
-	}
-
-	if acceptsHTML(r) {
-		if p.defaultViewerRef != "" && ref != p.defaultViewerRef {
-			if html := p.resolveDefaultViewerHTML(ref); html != "" {
-				writePageHTML(w, html, p.baseDomain())
-				return
-			}
-		}
-		log.Printf("[proxy] GET /%s: client accepts HTML but no PAGE found, serving JSON", ref)
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
-}
-
-// resolvePageHTML extracts HTML from a PAGE object or follows a page relation.
-// Only reads from local store — all upstream syncing must be done beforehand.
-func (p *Proxy) resolvePageHTML(reqRef string, data []byte) string {
 	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
-		return ""
+		log.Printf("[proxy] ERROR: GET /%s: parse stored object: %v", ref, err)
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
+		return
 	}
-
-	if item.Type == "PAGE" {
-		log.Printf("[proxy] GET /%s: serving inline PAGE HTML", reqRef)
-		return extractHTML(item)
+	resolver := newViewerResolver(p.store, p.index, ref, data, auth.AuthPubkey(r))
+	selected := selectNegotiatedRepresentation(r, resolver, p.defaultViewerRef)
+	selected.setCacheHeaders(w)
+	if pageRef := selected.isolatedPageRef(); pageRef != "" &&
+		vhostRedirect(w, r, p.Vhost, p.VhostMode, ref, pageRef, "") {
+		return
 	}
-
-	pageRels, ok := item.Relations["page"]
-	if !ok || len(pageRels) == 0 {
-		return ""
+	etag := selected.etag(item.Revision)
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
 	}
-	var rel object.RelationRef
-	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
-		return ""
-	}
-	pageData, err := p.store.Read(rel.Ref)
-	if err != nil || pageData == nil {
-		log.Printf("[proxy] GET /%s: page relation %s not in local store", reqRef, rel.Ref)
-		return ""
-	}
-	_, pageItem, err := object.ParseEnvelope(pageData)
-	if err != nil || pageItem.Type != "PAGE" {
-		return ""
-	}
-	log.Printf("[proxy] GET /%s: serving HTML via page relation %s", reqRef, rel.Ref)
-	return extractHTML(pageItem)
-}
-
-// resolveDefaultViewerHTML loads the default viewer PAGE HTML from local store.
-func (p *Proxy) resolveDefaultViewerHTML(reqRef string) string {
-	data, err := p.store.Read(p.defaultViewerRef)
-	if err != nil || data == nil {
-		log.Printf("[proxy] GET /%s: default viewer %s not in local store", reqRef, p.defaultViewerRef)
-		return ""
-	}
-	log.Printf("[proxy] GET /%s: trying default viewer %s", reqRef, p.defaultViewerRef)
-	return p.resolvePageHTML(reqRef, data)
+	selected.write(w, data, p.baseDomain())
 }
 
 // storePrivateLocally stores a private object locally without forwarding to upstream.
