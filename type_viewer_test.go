@@ -77,12 +77,19 @@ func assertBodyContains(t *testing.T, resp *http.Response, marker string) []byte
 }
 
 func conditionalGet(t *testing.T, tsURL, path, etag string) *http.Response {
+	return conditionalGetWithAccept(t, tsURL, path, etag, "")
+}
+
+func conditionalGetWithAccept(t *testing.T, tsURL, path, etag, accept string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, tsURL+path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("If-None-Match", etag)
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -140,6 +147,22 @@ func TestTypeDefaultViewerRepresentationsAndPrecedence(t *testing.T) {
 	if rawResp.StatusCode != http.StatusOK || rawResp.Header.Get("Content-Type") != "image/png" {
 		t.Fatalf("/raw changed: status=%d content-type=%q", rawResp.StatusCode, rawResp.Header.Get("Content-Type"))
 	}
+}
+
+func TestTypeDefaultViewerPrecedesHubDefault(t *testing.T) {
+	ts, _, cleanup := testHubWithViewer(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	pageRef, page := viewerPage(t, priv, pubkey, "11000000-0000-4000-8000-000000000001", 1, []string{"dataverse001"}, "TYPE-BEFORE-HUB-DEFAULT")
+	typeRef, typeData := typeWithViewer(t, priv, pubkey, "11000000-0000-4000-8000-000000000002", 1, []string{"dataverse001"}, pageRef)
+	noteRef, note := viewedNote(t, priv, pubkey, "11000000-0000-4000-8000-000000000003", 1, []string{"dataverse001"}, typeRef, nil)
+	for ref, data := range map[string][]byte{pageRef: page, typeRef: typeData, noteRef: note} {
+		putOK(t, ts, ref, data)
+	}
+
+	assertBodyContains(t, doGetWithAccept(t, ts, "/"+noteRef, browserAccept), "TYPE-BEFORE-HUB-DEFAULT")
+	assertBodyContains(t, doGet(t, ts, "/"+noteRef+"/page"), "TYPE-BEFORE-HUB-DEFAULT")
 }
 
 func TestTypeDefaultViewerFallsBackSafely(t *testing.T) {
@@ -277,6 +300,50 @@ func TestTypeDefaultViewerVhostPrivateDependencyIsNotCacheable(t *testing.T) {
 	}
 }
 
+func TestPrivateObjectTypeDefaultViewerUsesLoginFlow(t *testing.T) {
+	ts, _, cleanup := testHubWithVhost(t, "example.com", nil)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	privateRealm := []string{pubkey}
+	pageRef, page := viewerPage(t, priv, pubkey, "42000000-0000-4000-8000-000000000001", 1, privateRealm, "PRIVATE-OBJECT-TYPE-VIEWER")
+	typeRef, typeData := typeWithViewer(t, priv, pubkey, "42000000-0000-4000-8000-000000000002", 1, privateRealm, pageRef)
+	noteRef, note := viewedNote(t, priv, pubkey, "42000000-0000-4000-8000-000000000003", 1, privateRealm, typeRef, nil)
+	for ref, data := range map[string][]byte{pageRef: page, typeRef: typeData, noteRef: note} {
+		putOK(t, ts, ref, data)
+	}
+
+	pageHost := vhost.PageHash(pageRef) + ".example.com"
+	redirect := doGetWithHost(t, ts, "/"+noteRef, "example.com", browserAccept)
+	if redirect.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(redirect.Body)
+		redirect.Body.Close()
+		t.Fatalf("private inherited viewer redirect status = %d, want 302: %s", redirect.StatusCode, body)
+	}
+	wantLocation := fmt.Sprintf("http://%s/%s", pageHost, noteRef)
+	if got := redirect.Header.Get("Location"); got != wantLocation {
+		redirect.Body.Close()
+		t.Fatalf("private inherited viewer redirect = %q, want %q", got, wantLocation)
+	}
+	redirect.Body.Close()
+
+	login := doGetWithHost(t, ts, "/"+noteRef, pageHost, browserAccept)
+	loginBody, err := io.ReadAll(login.Body)
+	login.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login.StatusCode != http.StatusOK || !bytes.Contains(loginBody, []byte("Sign In To View This Page")) {
+		t.Fatalf("private inherited viewer login: status=%d body=%s", login.StatusCode, loginBody)
+	}
+	if bytes.Contains(loginBody, []byte("PRIVATE-OBJECT-TYPE-VIEWER")) {
+		t.Fatalf("private inherited viewer leaked before authentication: %s", loginBody)
+	}
+
+	cookie := authenticateHost(t, ts, pageHost, priv, pubkey)
+	assertBodyContains(t, doGetWithHostAndCookie(t, ts, "/"+noteRef, pageHost, browserAccept, cookie), "PRIVATE-OBJECT-TYPE-VIEWER")
+}
+
 func TestProxySynchronizesTypeDefaultViewer(t *testing.T) {
 	proxy, root, cleanup := testRootAndProxy(t)
 	defer cleanup()
@@ -291,6 +358,26 @@ func TestProxySynchronizesTypeDefaultViewer(t *testing.T) {
 
 	assertBodyContains(t, doGetWithAccept(t, proxy, "/"+noteRef, browserAccept), "PROXY-TYPE-VIEWER")
 	assertBodyContains(t, doGet(t, proxy, "/"+noteRef+"/page"), "PROXY-TYPE-VIEWER")
+}
+
+func TestProxyBlobUsesTypeDefaultViewerForHTML(t *testing.T) {
+	proxy, root, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	pageRef, page := viewerPage(t, priv, pubkey, "50500000-0000-4000-8000-000000000001", 1, []string{"dataverse001"}, "PROXY-BLOB-TYPE-VIEWER")
+	typeRef, typeData := typeWithViewer(t, priv, pubkey, "50500000-0000-4000-8000-000000000002", 1, []string{"dataverse001"}, pageRef)
+	blobRef, blob := viewedBlob(t, priv, pubkey, "50500000-0000-4000-8000-000000000003", typeRef)
+	for ref, data := range map[string][]byte{pageRef: page, typeRef: typeData, blobRef: blob} {
+		putOK(t, root, ref, data)
+	}
+
+	assertBodyContains(t, doGetWithAccept(t, proxy, "/"+blobRef, browserAccept), "PROXY-BLOB-TYPE-VIEWER")
+	raw := doGetWithAccept(t, proxy, "/"+blobRef+"/raw", browserAccept)
+	defer raw.Body.Close()
+	if raw.StatusCode != http.StatusOK || raw.Header.Get("Content-Type") != "image/png" {
+		t.Fatalf("proxy BLOB /raw changed: status=%d content-type=%q", raw.StatusCode, raw.Header.Get("Content-Type"))
+	}
 }
 
 func TestProxyRefreshesInheritedViewerETag(t *testing.T) {
@@ -333,6 +420,36 @@ func TestProxyRefreshesInheritedViewerETag(t *testing.T) {
 	assertBodyContains(t, typeRefresh, "PROXY-PAGE-B-1")
 	if etag3 := typeRefresh.Header.Get("ETag"); etag3 == etag2 {
 		t.Fatal("proxy TYPE refresh did not change inherited-viewer ETag")
+	}
+}
+
+func TestProxyBrowserGetRefreshesInheritedViewerETag(t *testing.T) {
+	proxy, root, cleanup := testRootAndProxy(t)
+	defer cleanup()
+
+	priv, pubkey := testKeypair(t)
+	pageRef, page1 := viewerPage(t, priv, pubkey, "51500000-0000-4000-8000-000000000001", 1, []string{"dataverse001"}, "PROXY-BROWSER-PAGE-1")
+	typeRef, typeData := typeWithViewer(t, priv, pubkey, "51500000-0000-4000-8000-000000000002", 1, []string{"dataverse001"}, pageRef)
+	noteRef, note := viewedNote(t, priv, pubkey, "51500000-0000-4000-8000-000000000003", 1, []string{"dataverse001"}, typeRef, nil)
+	for ref, data := range map[string][]byte{pageRef: page1, typeRef: typeData, noteRef: note} {
+		putOK(t, root, ref, data)
+	}
+
+	initial := doGetWithAccept(t, proxy, "/"+noteRef, browserAccept)
+	assertBodyContains(t, initial, "PROXY-BROWSER-PAGE-1")
+	etag1 := initial.Header.Get("ETag")
+
+	_, page2 := viewerPage(t, priv, pubkey, "51500000-0000-4000-8000-000000000001", 2, []string{"dataverse001"}, "PROXY-BROWSER-PAGE-2")
+	updated := doPut(t, root, pageRef, page2)
+	if updated.StatusCode != http.StatusOK {
+		t.Fatalf("root PAGE update status = %d", updated.StatusCode)
+	}
+	updated.Body.Close()
+
+	refreshed := conditionalGetWithAccept(t, proxy.URL, "/"+noteRef, etag1, browserAccept)
+	assertBodyContains(t, refreshed, "PROXY-BROWSER-PAGE-2")
+	if etag2 := refreshed.Header.Get("ETag"); etag2 == etag1 {
+		t.Fatal("proxy browser GET did not refresh inherited-viewer ETag")
 	}
 }
 
