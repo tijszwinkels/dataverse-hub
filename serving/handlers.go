@@ -69,7 +69,7 @@ func (h *Hub) handleRoot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusNotFound, "page not found", "NOT_FOUND")
 			return
 		}
-		html := h.resolvePageHTML(data)
+		html := pageOwnHTML(data)
 		if html == "" {
 			writeError(w, r, http.StatusNotFound, "page has no HTML", "NOT_FOUND")
 			return
@@ -101,7 +101,7 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fast path: use index to build ETag and check 304 without disk I/O
+	// Use the index for existence and access control before reading the object.
 	meta, found := h.index.GetMeta(ref)
 	if !found {
 		// Not in index — check disk (race condition or index lag)
@@ -120,82 +120,33 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Private object access control: return 404 (not 403) to avoid leaking existence
+	// Private object access control: return 404 (not 403) to avoid leaking existence.
+	// HTML viewers retain the existing isolated-origin login flow, using the
+	// same centralized viewer resolution as the authorized response path.
 	if !meta.IsPublic {
 		authPK := auth.AuthPubkey(r)
 		if !realm.CanRead(meta.Realms, authPK, h.index.Resolver()) {
-			if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
-				pageRef := ref
-				if meta.HasPageRelation && meta.PageRef != "" {
-					pageRef = meta.PageRef
-				}
-				if !canonicalPageHost(h.VhostMode, h.Vhost, r.Host, pageRef) {
-					target := pageRedirectTarget(h.VhostMode, h.Vhost, r, ref, pageRef)
-					if r.URL.RawQuery != "" {
-						target += "?" + r.URL.RawQuery
-					}
-					http.Redirect(w, r, target, http.StatusFound)
+			if data, err := h.store.Read(ref); err == nil && data != nil {
+				resolver := newViewerResolver(h.store, h.index, ref, data, authPK)
+				if servePrivateViewerLogin(w, r, resolver, h.Vhost, h.VhostMode, ref) {
 					return
 				}
-				servePrivatePageLogin(w)
-				return
 			}
 			writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 			return
 		}
 	}
-
-	// Build ETag from indexed revision
-	etag := `"` + strconv.Itoa(meta.Revision) + `"`
-
-	// Determine representation from index data (no disk I/O). Precedence:
-	//   1. PAGE / page-relation viewer — for HTML-accepting clients only.
-	//   2. raw BLOB content negotiation — curl, */*, or a BLOB with no page relation.
-	//   3. generic default viewer — for HTML-accepting clients; never pre-empts a raw BLOB.
-	// This mirrors serveObject's body decision so the ETag matches what is served.
-	isHTML := false
-	isBlob := false
-	switch {
-	case acceptsHTML(r) && pageViewable(h.index, meta):
-		isHTML = true
-	case meta.Type == "BLOB" && meta.MimeType != "" && acceptsMimeType(r, meta.MimeType):
-		isBlob = true
-	case acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef:
-		isHTML = true
-	}
-
-	if isHTML {
-		etag = etag[:len(etag)-1] + pageETagSuffix(h.index, meta, h.defaultViewerRef) + `"`
-	} else if isBlob {
-		etag = etag[:len(etag)-1] + `-blob"`
-	}
-
-	// Vhost redirect: if this is a PAGE and we're on the wrong subdomain, redirect
-	if h.Vhost != nil && acceptsHTML(r) && (meta.Type == "PAGE" || meta.HasPageRelation) {
-		pageRef := ref
-		if meta.HasPageRelation && meta.PageRef != "" {
-			pageRef = meta.PageRef
-		}
-		if !canonicalPageHost(h.VhostMode, h.Vhost, r.Host, pageRef) {
-			target := pageRedirectTarget(h.VhostMode, h.Vhost, r, ref, pageRef)
-			if r.URL.RawQuery != "" {
-				target += "?" + r.URL.RawQuery
-			}
-			http.Redirect(w, r, target, http.StatusFound)
+	if etag, ok := indexedNonHTMLValidator(r, meta); ok {
+		w.Header().Set("Vary", "Accept")
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
 			return
 		}
 	}
 
-	w.Header().Set("Vary", "Accept")
-	w.Header().Set("ETag", etag)
-
-	// 304 Not Modified — zero disk I/O
-	if match := r.Header.Get("If-None-Match"); match == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	// Cache miss — read file for the response body
+	// Read the requested object before selecting HTML so viewer resolution and
+	// its validator are derived from the exact representation being served.
 	data, err := h.store.Read(ref)
 	if err != nil {
 		log.Printf("ERROR: GET /%s: %v", ref, err)
@@ -210,37 +161,29 @@ func (h *Hub) handleGetObject(w http.ResponseWriter, r *http.Request) {
 	h.serveObject(w, r, ref, data)
 }
 
-// serveObject writes the response body for a GET that isn't 304.
-// ETag/Vary headers must already be set by the caller.
-//
-// A real page relation or inline PAGE renders the viewer for HTML-accepting
-// clients, taking priority over raw BLOB serving — this is what lets a browser
-// open a BLOB and see its attached viewer instead of raw bytes. The generic
-// default viewer does NOT pre-empt a raw BLOB (it runs after serveBlob), so a
-// BLOB with no page relation still serves its raw bytes to browsers. Non-HTML
-// clients (curl's */*, application/json) never enter the acceptsHTML branches,
-// so they keep their raw-BLOB / JSON-envelope behavior unchanged.
+// serveObject selects, validates, and writes GET /{ref}'s representation.
 func (h *Hub) serveObject(w http.ResponseWriter, r *http.Request, ref string, data []byte) {
-	if acceptsHTML(r) {
-		if html := h.resolvePageHTML(data); html != "" {
-			writePageHTML(w, html, h.baseDomain())
-			return
-		}
-	}
-
-	if serveBlob(w, r, data) {
+	_, item, err := object.ParseEnvelope(data)
+	if err != nil {
+		log.Printf("ERROR: GET /%s: parse stored object: %v", ref, err)
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
-
-	if acceptsHTML(r) && h.defaultViewerRef != "" && ref != h.defaultViewerRef {
-		if html := h.resolveDefaultViewerHTML(); html != "" {
-			writePageHTML(w, html, h.baseDomain())
-			return
-		}
+	resolver := newViewerResolver(h.store, h.index, ref, data, auth.AuthPubkey(r))
+	selected := selectNegotiatedRepresentation(r, resolver, h.defaultViewerRef)
+	selected.setCacheHeaders(w)
+	if pageRef := selected.isolatedPageRef(); pageRef != "" &&
+		vhostRedirect(w, r, h.Vhost, h.VhostMode, ref, pageRef, "") {
+		return
 	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	etag := selected.etag(item.Revision)
+	w.Header().Set("Vary", "Accept")
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	selected.write(w, data, h.baseDomain())
 }
 
 // handlePutObject serves PUT /{ref}
@@ -520,94 +463,6 @@ func stripBlobData(data json.RawMessage) json.RawMessage {
 	obj["item"], _ = json.Marshal(item)
 	result, _ := json.Marshal(obj)
 	return result
-}
-
-// resolvePageHTML extracts HTML content from a PAGE object, or follows a `page`
-// relation to find one. Returns empty string if no HTML can be resolved.
-func (h *Hub) resolvePageHTML(data []byte) string {
-	env, item, err := object.ParseEnvelope(data)
-	if err != nil {
-		return ""
-	}
-	_ = env
-
-	// Case 1: object itself is a PAGE
-	if item.Type == "PAGE" {
-		return extractHTML(item)
-	}
-
-	// Case 2: object has a `page` relation — follow the first ref
-	pageRels, ok := item.Relations["page"]
-	if !ok || len(pageRels) == 0 {
-		return ""
-	}
-	var rel object.RelationRef
-	if err := json.Unmarshal(pageRels[0], &rel); err != nil || rel.Ref == "" {
-		log.Printf("WARN: resolvePageHTML: invalid page relation: %v", err)
-		return ""
-	}
-	pageData, err := h.store.Read(rel.Ref)
-	if err != nil || pageData == nil {
-		log.Printf("WARN: resolvePageHTML: page ref %s not found: %v", rel.Ref, err)
-		return ""
-	}
-	_, pageItem, err := object.ParseEnvelope(pageData)
-	if err != nil {
-		log.Printf("WARN: resolvePageHTML: failed to parse page %s: %v", rel.Ref, err)
-		return ""
-	}
-	if pageItem.Type != "PAGE" {
-		log.Printf("WARN: resolvePageHTML: page ref %s is type %q, not PAGE", rel.Ref, pageItem.Type)
-		return ""
-	}
-	return extractHTML(pageItem)
-}
-
-// resolveDefaultViewerHTML loads and caches the default viewer PAGE's HTML.
-func (h *Hub) resolveDefaultViewerHTML() string {
-	data, err := h.store.Read(h.defaultViewerRef)
-	if err != nil || data == nil {
-		log.Printf("WARN: default viewer %s not found: %v", h.defaultViewerRef, err)
-		return ""
-	}
-	return h.resolvePageHTML(data)
-}
-
-// pageViewable reports whether an HTML request for meta should render a
-// page-relation / inline-PAGE viewer. A PAGE always renders its inline HTML; a
-// page relation only renders when its target PAGE is present in the index (and
-// thus the store). Gating on availability keeps the ETag representation in step
-// with serveObject(Data): if the page can't be resolved, both fall back to the
-// raw BLOB, so the ETag must not claim HTML.
-func pageViewable(index *storage.Index, meta object.ObjectMeta) bool {
-	if meta.Type == "PAGE" {
-		return true
-	}
-	if meta.HasPageRelation && meta.PageRef != "" {
-		_, found := index.GetMeta(meta.PageRef)
-		return found
-	}
-	return false
-}
-
-// pageETagSuffix returns the ETag suffix for HTML representations.
-// Includes the page/viewer revision so browser caches invalidate when the PAGE changes.
-func pageETagSuffix(index *storage.Index, meta object.ObjectMeta, defaultViewerRef string) string {
-	if meta.Type == "PAGE" {
-		return "-html" // own revision tracks HTML changes
-	}
-	pageRef := meta.PageRef
-	if pageRef == "" && defaultViewerRef != "" && meta.Ref != defaultViewerRef {
-		pageRef = defaultViewerRef
-	}
-	if pageRef == "" {
-		return "-html"
-	}
-	pageMeta, found := index.GetMeta(pageRef)
-	if !found {
-		return "-html"
-	}
-	return fmt.Sprintf("-p%d-html", pageMeta.Revision)
 }
 
 // extractHTML pulls the html string from item.content.html.

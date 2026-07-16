@@ -179,40 +179,36 @@ func pageOwnHTML(data []byte) string {
 	return extractHTML(item)
 }
 
-// serveProjectionPage forces the HTML representation. renderPage resolves an
-// inline PAGE or page-relation viewer; renderDefault resolves the configured
-// default viewer (only consulted when the object is not itself page-viewable).
-// 409 when no HTML representation is available. ETag "<rev>-...-html" and 304
-// match GET /{ref}'s HTML representation.
-func serveProjectionPage(w http.ResponseWriter, r *http.Request, store *storage.Store, index *storage.Index, ref string, meta object.ObjectMeta, found bool, defaultViewerRef, baseDomain string, renderPage func([]byte) string, renderDefault func() string) {
-	hasDefault := defaultViewerRef != "" && ref != defaultViewerRef
-	if found {
-		if !pageViewable(index, meta) && !hasDefault {
-			writeError(w, r, http.StatusConflict, "object has no page representation", "NO_PAGE")
-			return
-		}
-		etag := `"` + strconv.Itoa(meta.Revision) + pageETagSuffix(index, meta, defaultViewerRef) + `"`
-		w.Header().Set("ETag", etag)
-		if r.Header.Get("If-None-Match") == etag {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
+// serveProjectionPage forces the centrally resolved HTML representation.
+func serveProjectionPage(w http.ResponseWriter, r *http.Request, store *storage.Store, index *storage.Index, ref, defaultViewerRef, baseDomain string, vhostResolver *vhost.Resolver, vhostMode string) {
 	data, ok := readForProjection(w, r, store, ref)
 	if !ok {
 		return
 	}
-	if html := renderPage(data); html != "" {
-		writePageHTML(w, html, baseDomain)
+	_, item, err := object.ParseEnvelope(data)
+	if err != nil {
+		log.Printf("ERROR: GET /%s/page: parse stored object: %v", ref, err)
+		writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 		return
 	}
-	if hasDefault {
-		if html := renderDefault(); html != "" {
-			writePageHTML(w, html, baseDomain)
-			return
-		}
+	resolver := newViewerResolver(store, index, ref, data, auth.AuthPubkey(r))
+	selected, ok := selectPageRepresentation(resolver, defaultViewerRef)
+	if !ok {
+		writeError(w, r, http.StatusConflict, "object has no page representation", "NO_PAGE")
+		return
 	}
-	writeError(w, r, http.StatusConflict, "object has no page representation", "NO_PAGE")
+	selected.setCacheHeaders(w)
+	if pageRef := selected.isolatedPageRef(); pageRef != "" &&
+		vhostRedirect(w, r, vhostResolver, vhostMode, ref, pageRef, "/page") {
+		return
+	}
+	etag := selected.etag(item.Revision)
+	w.Header().Set("ETag", etag)
+	if r.Header.Get("If-None-Match") == etag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	selected.write(w, data, baseDomain)
 }
 
 // vhostRedirect issues the per-app origin-isolation 302 for an author-controlled
@@ -220,8 +216,8 @@ func serveProjectionPage(w http.ResponseWriter, r *http.Request, store *storage.
 // request hit a non-canonical host, preserving the given path suffix (e.g.
 // "/page", "/raw") and the query string so the target still pins that
 // representation. Returns true if it redirected; the caller must then stop.
-// The pageVhostRedirect / rawVhostRedirect wrappers decide whether to redirect
-// and pick pageRef, because /page and /raw canonicalize differently (see each).
+// The selected viewer and rawVhostRedirect decide which PAGE owns the origin,
+// because /page and /raw canonicalize differently (see each).
 func vhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resolver, vhostMode, ref, pageRef, pathSuffix string) bool {
 	if resolver == nil {
 		return false
@@ -235,24 +231,6 @@ func vhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resol
 	}
 	http.Redirect(w, r, target, http.StatusFound)
 	return true
-}
-
-// pageVhostRedirect enforces per-app origin isolation for GET /{ref}/page. When
-// the object is a PAGE (or resolves one via a page relation) and the request hit
-// a non-canonical host, it 302s to the canonical page host — the same check
-// GET /{ref} makes, minus the acceptsHTML gate (/page always serves HTML, so the
-// shared-origin exposure exists for every Accept). It canonicalizes on the
-// resolved PAGE ref: the page-relation target when there is one, else the
-// object's own ref.
-func pageVhostRedirect(w http.ResponseWriter, r *http.Request, resolver *vhost.Resolver, vhostMode, ref string, meta object.ObjectMeta) bool {
-	if !(meta.Type == "PAGE" || meta.HasPageRelation) {
-		return false
-	}
-	pageRef := ref
-	if meta.HasPageRelation && meta.PageRef != "" {
-		pageRef = meta.PageRef
-	}
-	return vhostRedirect(w, r, resolver, vhostMode, ref, pageRef, "/page")
 }
 
 // rawVhostRedirect enforces per-app origin isolation for GET /{ref}/raw. /raw on
@@ -495,16 +473,11 @@ func (h *Hub) servePageForRef(w http.ResponseWriter, r *http.Request, ref string
 		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
 		return
 	}
-	meta, found, ok := authorizeProjection(w, r, ref, h.index)
+	_, _, ok := authorizeProjection(w, r, ref, h.index)
 	if !ok {
 		return
 	}
-	if pageVhostRedirect(w, r, h.Vhost, h.VhostMode, ref, meta) {
-		return
-	}
-	serveProjectionPage(w, r, h.store, h.index, ref, meta, found, h.defaultViewerRef, h.baseDomain(),
-		func(data []byte) string { return h.resolvePageHTML(data) },
-		h.resolveDefaultViewerHTML)
+	serveProjectionPage(w, r, h.store, h.index, ref, h.defaultViewerRef, h.baseDomain(), h.Vhost, h.VhostMode)
 }
 
 // --- Proxy handlers ---
@@ -602,14 +575,9 @@ func (p *Proxy) servePageForRef(w http.ResponseWriter, r *http.Request, ref stri
 	if !p.syncFromUpstream(w, r, ref, true) {
 		return
 	}
-	meta, found, ok := authorizeProjection(w, r, ref, p.index)
+	_, _, ok := authorizeProjection(w, r, ref, p.index)
 	if !ok {
 		return
 	}
-	if pageVhostRedirect(w, r, p.Vhost, p.VhostMode, ref, meta) {
-		return
-	}
-	serveProjectionPage(w, r, p.store, p.index, ref, meta, found, p.defaultViewerRef, p.baseDomain(),
-		func(data []byte) string { return p.resolvePageHTML(ref, data) },
-		func() string { return p.resolveDefaultViewerHTML(ref) })
+	serveProjectionPage(w, r, p.store, p.index, ref, p.defaultViewerRef, p.baseDomain(), p.Vhost, p.VhostMode)
 }
