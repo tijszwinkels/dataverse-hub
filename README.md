@@ -352,6 +352,18 @@ Virtual hosting gives each PAGE its own origin (subdomain or custom domain). The
 - **Hash subdomains** (`{hash}.dataverse001.net`) — every PAGE gets a unique, deterministic subdomain automatically.
 - **Custom domains** — PAGE authors can point their own domain at the hub for friendlier URLs, with the same isolation.
 
+For inline, direct, and TYPE-inherited viewers, the resolved PAGE is the
+isolation boundary, not the viewed object. Objects that share a direct PAGE or
+inherit the same PAGE from their TYPE intentionally render on the same origin
+and therefore share that origin's cookies and storage. The Hub-wide generic
+default viewer remains on the shared Hub origin.
+
+For a known private object ref with an inline, direct, or TYPE-inherited viewer,
+an unauthenticated browser request enters the viewer origin's sign-in flow rather
+than returning the data API's flat `404`. This confirms that the known ref has a
+browser view, but does not expose the private object, TYPE, or PAGE content before
+authentication.
+
 **With `vhost_mode = "redirect"`**, pretty domains still work as entrypoints, but browsers are redirected back to the shared base-domain path. That keeps friendly URLs functional without per-page origin isolation.
 
 **Without virtual hosting** (`base_domain = ""` or `vhost_mode = "off"`), all PAGEs share one origin. This is fine for trusted content but unsuitable for hosting untrusted third-party pages.
