@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tijszwinkels/dataverse-hub/object"
@@ -38,6 +39,13 @@ type Job struct {
 // file instead of being swallowed when the in-flight job completes. Stranded
 // inflight/ files (hub killed mid-publish) are recovered to pending on open.
 type queue struct {
+	// mu serializes every queue operation. The HTTP write path calls Put
+	// while the worker calls Claim/Done/Requeue/Fail, and the read-then-act
+	// sequences inside them (Put's supersede check, Claim's decode-then-
+	// rename) are not atomic on their own: without this lock a Put landing
+	// between Claim's decode and its rename would be renamed into inflight
+	// and then deleted by Done, losing that revision for good.
+	mu          sync.Mutex
 	dir         string
 	inflightDir string
 	failedDir   string
@@ -66,6 +74,13 @@ func newQueue(dir string) (*queue, error) {
 // revision is strictly newer. An equal-or-older revision is dropped: it is
 // either a duplicate or a stale write that the queued job already covers.
 func (q *queue) Put(j *Job) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.put(j)
+}
+
+// put is Put without the lock. Callers must hold q.mu.
+func (q *queue) put(j *Job) error {
 	if !object.IsValidRef(j.Ref) {
 		return fmt.Errorf("freenet queue: refusing job with invalid ref %q", j.Ref)
 	}
@@ -79,6 +94,9 @@ func (q *queue) Put(j *Job) error {
 // Returns (nil, nil) when nothing is runnable — either the queue is empty or
 // every pending job is still waiting out its retry backoff.
 func (q *queue) Claim(now time.Time) (*Job, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	jobs, err := q.pending()
 	if err != nil {
 		return nil, err
@@ -106,6 +124,13 @@ func (q *queue) Claim(now time.Time) (*Job, error) {
 
 // Done drops a successfully published job.
 func (q *queue) Done(j *Job) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.done(j)
+}
+
+// done is Done without the lock. Callers must hold q.mu.
+func (q *queue) done(j *Job) error {
 	if err := os.Remove(q.inflightPath(j.Ref)); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("freenet queue done %s: %w", j.Ref, err)
 	}
@@ -116,28 +141,58 @@ func (q *queue) Done(j *Job) error {
 // revision enqueued while this job was in flight wins — Put's supersede rule
 // keeps it and this attempt is simply dropped.
 func (q *queue) Requeue(j *Job) error {
-	if err := q.Put(j); err != nil {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if err := q.put(j); err != nil {
 		return err
 	}
-	return q.Done(j)
+	return q.done(j)
 }
 
 // Fail records a job that exhausted its retries under failed/ so it stays
 // visible to operators instead of vanishing.
 func (q *queue) Fail(j *Job) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if err := q.write(q.failedPath(j.Ref), j); err != nil {
 		return err
 	}
-	return q.Done(j)
+	return q.done(j)
 }
 
 // Depth counts pending jobs, including those waiting out a retry backoff.
+//
+// It counts directory entries and deliberately does not decode them: Depth is
+// a metric, and decoding every queued envelope to produce it would make a
+// large backlog expensive to observe. A malformed .json file is therefore
+// counted even though Claim will skip it.
 func (q *queue) Depth() int {
-	jobs, err := q.pending()
+	return countJobFiles(q.dir)
+}
+
+// FailedDepth counts jobs that exhausted their retries and are waiting for an
+// operator. Read from disk rather than a counter so it survives a restart.
+func (q *queue) FailedDepth() int {
+	return countJobFiles(q.failedDir)
+}
+
+// countJobFiles counts job files in dir without opening them.
+func countJobFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return 0
 	}
-	return len(jobs)
+	n := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // pending decodes every readable pending job. Unreadable or malformed files
@@ -187,7 +242,7 @@ func (q *queue) recoverInflight() error {
 		}
 		// Put drops it if a newer revision is already pending; either way the
 		// inflight copy goes away.
-		if err := q.Put(j); err != nil {
+		if err := q.put(j); err != nil {
 			continue
 		}
 		os.Remove(filepath.Join(q.inflightDir, name))

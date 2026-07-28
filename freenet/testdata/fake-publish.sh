@@ -16,6 +16,9 @@
 #                       succeed — drives the retry/backoff tests.
 #   FAKE_PUBLISH_SLEEP  sleep this many seconds before exiting — drives
 #                       the timeout tests.
+#   FAKE_PUBLISH_BULK   emit this many filler lines before finishing, then a
+#                       final DIAGNOSTIC-TAIL marker — used to check that
+#                       captured output is memory-bounded and keeps the tail.
 #   FAKE_PUBLISH_CHILD  spawn a background child that writes to this path
 #                       after 2s. A timeout that only kills the direct
 #                       child leaves it running and the file appears;
@@ -38,6 +41,13 @@ echo "fake-publish: stderr line" >&2
 
 if [ -n "${FAKE_PUBLISH_CHILD:-}" ]; then
     ( sleep 2; echo "orphan survived" > "$FAKE_PUBLISH_CHILD" ) &
+fi
+
+if [ -n "${FAKE_PUBLISH_BULK:-}" ]; then
+    for _ in $(seq "$FAKE_PUBLISH_BULK"); do
+        echo "filler xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    done
+    echo "DIAGNOSTIC-TAIL: the per-target report lives here" >&2
 fi
 
 if [ -n "${FAKE_PUBLISH_SLEEP:-}" ]; then

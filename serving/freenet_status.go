@@ -11,13 +11,20 @@ import (
 // handleFreenetStatus serves GET /freenet/status: queue depth, counters and
 // recent job transitions for the Freenet write-through mirror.
 //
-// Authentication required. The response exposes the refs the hub has been
-// publishing and the publisher's error output, which is operational detail
-// rather than public data — so it follows the same gate as GET /auth/realms,
-// the hub's existing non-object endpoint: any authenticated identity, 401
-// otherwise. A nil mirror still answers, reporting enabled:false, so an
-// operator can tell "mirroring is off" apart from "this hub predates the
-// feature".
+// Authentication required, following GET /auth/realms — the hub's existing
+// non-object endpoint: any authenticated identity, 401 otherwise.
+//
+// Note what that gate is and is not. The hub has no operator/admin concept:
+// anyone can generate a keypair and complete the public challenge flow, so
+// "authenticated" here means "not an anonymous scanner", not "trusted".
+// The payload is scoped accordingly — refs (public objects by construction),
+// counters and timings. The publisher's raw output is deliberately *not*
+// included, since it can carry filesystem paths and node details; it goes to
+// the hub log and the failed/ job file, which need filesystem access to read.
+//
+// The route is only registered when a mirror is configured, so this handler
+// never sees a nil mirror in practice; the nil-safe Status() call keeps it
+// correct regardless.
 func handleFreenetStatus(w http.ResponseWriter, r *http.Request, mirror *freenet.Mirror) {
 	if auth.AuthPubkey(r) == "" {
 		writeError(w, r, http.StatusUnauthorized, "authentication required", "UNAUTHORIZED")

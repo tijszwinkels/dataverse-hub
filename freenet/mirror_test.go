@@ -383,3 +383,114 @@ func TestMirrorRecentIsCapped(t *testing.T) {
 		t.Fatalf("len(Recent) = %d, want it capped at %d", got, maxRecentEvents)
 	}
 }
+
+// An enqueue that cannot reach disk must not vanish: the write still succeeds
+// for the client, but the mirror has to say it dropped one.
+func TestMirrorReportsDroppedEnqueue(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — directory permissions would not be enforced")
+	}
+	m, invocations := testMirror(t, 3)
+	m.Start()
+	defer m.Stop()
+
+	// Simulate the queue filesystem going read-only under a still-writable store.
+	if err := os.Chmod(m.q.dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(m.q.dir, 0o755)
+
+	m.Publish(refA, 1, publicRealms, envelopeFor(1))
+
+	st := m.Status()
+	if st.Dropped != 1 {
+		t.Fatalf("Dropped = %d, want 1 — a lost mirror job must be visible", st.Dropped)
+	}
+	if st.LastError == "" {
+		t.Error("LastError is empty, want the enqueue failure recorded")
+	}
+	if len(st.Recent) == 0 || st.Recent[0].Status != "dropped" {
+		t.Errorf("Recent[0] = %+v, want a dropped event", st.Recent)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if got := invocations(); len(got) != 0 {
+		t.Fatalf("nothing should have been published: %v", got)
+	}
+}
+
+// A failed job stays countable across a restart, so monitoring does not see
+// the failure disappear when the hub is bounced.
+func TestMirrorFailedQueueSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	queueDir := filepath.Join(dir, "queue")
+	t.Setenv("FAKE_PUBLISH_LOG", filepath.Join(dir, "invocations.log"))
+	t.Setenv("FAKE_PUBLISH_EXIT", "3")
+
+	opts := Options{
+		QueueDir:   queueDir,
+		PublishCmd: fakePublisherPath(t),
+		Timeout:    10 * time.Second,
+		Retries:    0,
+	}
+
+	first, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.backoffBase = 5 * time.Millisecond
+	first.pollInterval = 5 * time.Millisecond
+	first.Start()
+	first.Publish(refA, 1, publicRealms, envelopeFor(1))
+	waitFor(t, "the mirror to give up", func() bool { return first.Status().Failed == 1 })
+	if got := first.Status().FailedQueued; got != 1 {
+		t.Fatalf("FailedQueued = %d, want 1", got)
+	}
+	first.Stop()
+
+	second, err := New(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Stop()
+	st := second.Status()
+	if st.FailedQueued != 1 {
+		t.Fatalf("FailedQueued after restart = %d, want 1 — failures must not vanish on restart", st.FailedQueued)
+	}
+}
+
+// The status endpoint is reachable by anyone who can complete the public
+// challenge flow, so the publisher's raw output must not be echoed there.
+// The full detail still goes to the log and the failed/ job file.
+func TestMirrorStatusDoesNotLeakPublisherOutput(t *testing.T) {
+	t.Setenv("FAKE_PUBLISH_EXIT", "3")
+	m, _ := testMirror(t, 0)
+	m.Start()
+	defer m.Stop()
+
+	m.Publish(refA, 1, publicRealms, envelopeFor(1))
+	waitFor(t, "the mirror to give up", func() bool { return m.Status().Failed == 1 })
+
+	st := m.Status()
+	if strings.Contains(st.LastError, "fake-publish") {
+		t.Errorf("last_error leaks publisher output: %q", st.LastError)
+	}
+	if len(st.Recent) == 0 || strings.Contains(st.Recent[0].Error, "fake-publish") {
+		t.Errorf("recent[0].error leaks publisher output: %+v", st.Recent)
+	}
+	if st.LastError == "" {
+		t.Error("last_error is empty, want the error summary retained")
+	}
+
+	// The operator-only record on disk keeps the full diagnosis.
+	data, err := os.ReadFile(filepath.Join(m.q.failedDir, refA+".json"))
+	if err != nil {
+		t.Fatalf("read failed job: %v", err)
+	}
+	var recorded Job
+	if err := json.Unmarshal(data, &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(recorded.LastError, "fake-publish") {
+		t.Errorf("failed job file should keep the publisher output, got %q", recorded.LastError)
+	}
+}

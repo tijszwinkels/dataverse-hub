@@ -297,23 +297,53 @@ func TestFreenetStatusReportsJobs(t *testing.T) {
 	}
 }
 
-func TestFreenetStatusWhenDisabled(t *testing.T) {
+// With the mirror off the route must not exist at all: a hub with no
+// [freenet] section has exactly the routing table it had before this feature.
+func TestFreenetStatusRouteAbsentWhenDisabled(t *testing.T) {
 	h := newMirrorHub(t, false)
 	priv, pubkey := testKeypair(t)
 
 	token := authenticateAs(t, h.ts, priv, pubkey)
 	resp := doGetWithToken(t, h.ts, "/freenet/status", token)
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /freenet/status = %d, want 200 (reporting that it is off)", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("GET /freenet/status = %d, want 404 when the mirror is disabled: %s", resp.StatusCode, body)
 	}
 
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), `"enabled":false`) {
-		t.Errorf("body = %s, want enabled:false", body)
+	// Unauthenticated too — the endpoint must not even hint that it exists.
+	anon, err := http.Get(h.ts.URL + "/freenet/status")
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A disabled mirror must still serialize cleanly, not as null.
-	if !strings.Contains(string(body), `"recent":[]`) {
-		t.Errorf("body = %s, want recent:[]", body)
+	defer anon.Body.Close()
+	if anon.StatusCode != http.StatusNotFound {
+		t.Fatalf("unauthenticated GET /freenet/status = %d, want 404", anon.StatusCode)
+	}
+}
+
+// The status payload must not echo the publisher's raw output: any keypair can
+// complete the challenge flow and read this endpoint.
+func TestFreenetStatusOmitsPublisherOutput(t *testing.T) {
+	t.Setenv("FAKE_PUBLISH_EXIT", "3")
+	h := newMirrorHub(t, true)
+	priv, pubkey := testKeypair(t)
+
+	_, resp := putObject(t, h.ts, priv, pubkey, "88888888-8888-4888-8888-888888888888", []string{"dataverse001"})
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT = %d, want 201", resp.StatusCode)
+	}
+	waitForMirror(t, "the mirror to give up", func() bool { return h.mirror.Status().Failed == 1 })
+
+	token := authenticateAs(t, h.ts, priv, pubkey)
+	statusResp := doGetWithToken(t, h.ts, "/freenet/status", token)
+	defer statusResp.Body.Close()
+	body, _ := io.ReadAll(statusResp.Body)
+
+	if strings.Contains(string(body), "fake-publish") {
+		t.Errorf("status leaks publisher output to any authenticated caller: %s", body)
+	}
+	if !strings.Contains(string(body), `"failed":1`) || !strings.Contains(string(body), `"failed_queued":1`) {
+		t.Errorf("status = %s, want failed:1 and failed_queued:1", body)
 	}
 }

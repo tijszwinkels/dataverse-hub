@@ -443,7 +443,7 @@ through a job's retry budget.
 ### Status
 
 ```
-GET /freenet/status        (authentication required)
+GET /freenet/status        (authentication required; 404 when the mirror is disabled)
 ```
 
 ```json
@@ -453,7 +453,9 @@ GET /freenet/status        (authentication required)
   "in_flight": 0,
   "succeeded": 12,
   "failed": 1,
-  "last_error": "publish command failed: exit status 1: ✗ <ref> (poke failed…)",
+  "failed_queued": 1,
+  "dropped": 0,
+  "last_error": "publish command failed: exit status 1",
   "recent": [
     {"ref": "<pubkey>.<uuid>", "revision": 3, "status": "succeeded",
      "attempts": 1, "duration_ms": 48213, "at": "2026-07-28T12:00:00Z"}
@@ -461,11 +463,27 @@ GET /freenet/status        (authentication required)
 }
 ```
 
-Authenticated because the response exposes which refs this hub has been
-publishing and the publisher's raw error output. It answers on a disabled hub
-too (`"enabled": false`), so an operator can tell "mirroring is off" apart from
-"this binary predates the feature". Every job transition is also logged with a
-`[freenet]` prefix.
+- `failed` counts give-ups by *this* process; `failed_queued` counts the job
+  files still sitting in `failed/`, so a failure does not disappear when the hub
+  is restarted.
+- `dropped` counts objects that could not be enqueued at all (a full or
+  read-only `queue_dir`). The client's write succeeded and there is no queue
+  file to find, so this counter is the only place such a loss is visible —
+  alarm on it.
+
+The route is registered only when the mirror is enabled; a hub with
+`enabled = false` returns 404, exactly as it did before this feature existed.
+
+Authentication is required, matching `GET /auth/realms`. Note what that gate is:
+the hub has no operator/admin concept, so anyone can generate a keypair and
+complete the public challenge flow. "Authenticated" means "not an anonymous
+scanner", not "trusted". The payload is scoped to match — refs (public objects
+by construction), counters and timings. The publisher's **raw output is
+deliberately excluded**, since it can carry filesystem paths and node details;
+it goes to the hub log and the `failed/` job file, both of which need
+filesystem access to read.
+
+Every job transition is also logged with a `[freenet]` prefix.
 
 ## Virtual hosting
 

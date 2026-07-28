@@ -213,3 +213,25 @@ func TestValidateCommand(t *testing.T) {
 		})
 	}
 }
+
+// A publisher that spews output must not be able to grow the hub's memory
+// without bound, and what is kept must be the diagnostically useful tail —
+// publish-v2.sh prints its per-target poke report last.
+func TestPublisherOutputIsBoundedAndKeepsTail(t *testing.T) {
+	t.Setenv("FAKE_PUBLISH_BULK", "2000") // ~140 KiB, far past the cap
+	p, _ := newTestPublisher(t, 30*time.Second)
+
+	out, err := p.Publish(context.Background(), job(refA, 1))
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	if len(out) > maxOutputBytes+128 {
+		t.Errorf("captured %d bytes, want it capped near %d", len(out), maxOutputBytes)
+	}
+	if !strings.Contains(out, "DIAGNOSTIC-TAIL") {
+		t.Error("the tail of the output was dropped — that is where the per-target report is")
+	}
+	if !strings.Contains(out, "truncated") {
+		t.Error("truncation should be visible in the captured output")
+	}
+}

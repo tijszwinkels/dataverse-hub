@@ -90,9 +90,13 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/auth/realms", handleAuthRealms(p.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(p.Vhost))
-	r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
-		handleFreenetStatus(w, r, p.Mirror)
-	})
+	// Registered only when the mirror is enabled, so a hub without a
+	// [freenet] section has exactly the routing table it had before.
+	if p.Mirror != nil {
+		r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
+			handleFreenetStatus(w, r, p.Mirror)
+		})
+	}
 	r.Get("/", p.handleRoot)
 	// Root representation aliases (see resolveRootTarget / Hub.Router).
 	r.Get("/json", p.handleRootJSON)

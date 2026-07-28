@@ -1,13 +1,13 @@
 package freenet
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -58,9 +58,9 @@ func (p *execPublisher) Publish(ctx context.Context, j *Job) (string, error) {
 
 	cmd := exec.CommandContext(runCtx, p.cmd, path)
 	cmd.Env = os.Environ() // the publisher needs PATH/HOME and its Freenet config
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	out := &tailBuffer{max: maxOutputBytes}
+	cmd.Stdout = out
+	cmd.Stderr = out
 	// Kill the whole process group on cancellation: the real publisher shells
 	// out to node/fdev, and killing only the script would leave those children
 	// running against Freenet long after we gave up on them.
@@ -69,7 +69,7 @@ func (p *execPublisher) Publish(ctx context.Context, j *Job) (string, error) {
 	cmd.WaitDelay = 5 * time.Second
 
 	runErr := cmd.Run()
-	output := truncateOutput(out.String())
+	output := out.String()
 
 	switch {
 	case ctx.Err() != nil:
@@ -130,9 +130,45 @@ func validateCommand(cmd string) error {
 	return nil
 }
 
-func truncateOutput(s string) string {
-	if len(s) <= maxOutputBytes {
-		return s
+// tailBuffer captures at most max bytes of output, discarding from the front
+// as more arrives.
+//
+// Two reasons it keeps the tail rather than the head. Memory: a buggy
+// publisher that prints continuously for the whole 15-minute timeout would
+// otherwise grow an unbounded buffer inside the hub, and truncating only after
+// the command exits is too late. Diagnostics: publish-v2.sh prints its
+// per-target poke report last, so the end of the output is the part that
+// explains a failure.
+type tailBuffer struct {
+	mu        sync.Mutex
+	buf       []byte
+	max       int
+	truncated bool
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	n := len(p)
+	if len(p) > t.max {
+		p = p[len(p)-t.max:]
+		t.truncated = true
 	}
-	return s[:maxOutputBytes] + "\n… (output truncated)"
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+		t.truncated = true
+	}
+	return n, nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.truncated {
+		return "… (earlier output truncated)\n" + string(t.buf)
+	}
+	return string(t.buf)
 }

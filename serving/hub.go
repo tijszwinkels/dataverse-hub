@@ -63,9 +63,13 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/auth/realms", handleAuthRealms(h.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(h.Vhost))
-	r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
-		handleFreenetStatus(w, r, h.Mirror)
-	})
+	// Registered only when the mirror is enabled, so a hub without a
+	// [freenet] section has exactly the routing table it had before.
+	if h.Mirror != nil {
+		r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
+			handleFreenetStatus(w, r, h.Mirror)
+		})
+	}
 	r.Get("/", h.handleRoot)
 	// Root representation aliases: the representation of whatever GET / resolves
 	// to on this host, served directly (see resolveRootTarget). Static routes,

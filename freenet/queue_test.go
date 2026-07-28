@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -328,4 +329,144 @@ func countJSON(t *testing.T, dir string) int {
 		}
 	}
 	return n
+}
+
+// Put and Claim run on different goroutines: the HTTP write path enqueues
+// while the worker claims. A revision accepted by Put must never be lost.
+func TestQueueConcurrentPutAndClaimNeverLosesNewestRevision(t *testing.T) {
+	const revisions = 300
+
+	for round := 0; round < 5; round++ {
+		q := testQueue(t)
+
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			for rev := 1; rev <= revisions; rev++ {
+				if err := q.Put(job(refA, rev)); err != nil {
+					t.Errorf("Put: %v", err)
+					return
+				}
+			}
+		}()
+
+		highest := 0
+		drain := func() {
+			for {
+				j, err := q.Claim(time.Now())
+				if err != nil {
+					t.Errorf("Claim: %v", err)
+					return
+				}
+				if j == nil {
+					return
+				}
+				if j.Revision < highest {
+					t.Errorf("claimed rev %d after rev %d — revisions went backwards", j.Revision, highest)
+				}
+				highest = j.Revision
+				if err := q.Done(j); err != nil {
+					t.Errorf("Done: %v", err)
+				}
+			}
+		}
+
+		for {
+			drain()
+			select {
+			case <-writerDone:
+				drain() // final sweep once the writer has stopped
+				if highest != revisions {
+					t.Fatalf("round %d: highest claimed revision %d, want %d — a queued revision was dropped",
+						round, highest, revisions)
+				}
+				goto nextRound
+			default:
+			}
+		}
+	nextRound:
+	}
+}
+
+// Two write-path goroutines enqueueing different revisions of one object must
+// not let the older one win.
+func TestQueueConcurrentPutsKeepNewestRevision(t *testing.T) {
+	for round := 0; round < 50; round++ {
+		q := testQueue(t)
+
+		var wg sync.WaitGroup
+		for rev := 1; rev <= 8; rev++ {
+			wg.Add(1)
+			go func(rev int) {
+				defer wg.Done()
+				if err := q.Put(job(refA, rev)); err != nil {
+					t.Errorf("Put: %v", err)
+				}
+			}(rev)
+		}
+		wg.Wait()
+
+		claimed, err := q.Claim(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claimed == nil || claimed.Revision != 8 {
+			t.Fatalf("round %d: queued %v, want revision 8 — an older Put clobbered a newer one", round, claimed)
+		}
+	}
+}
+
+// Depth is called for logging/metrics and must stay cheap: it counts queue
+// entries without opening or decoding them.
+func TestQueueDepthDoesNotReadJobBodies(t *testing.T) {
+	q := testQueue(t)
+	for i := 0; i < 5; i++ {
+		j := job(refA[:len(refA)-1]+string(rune('a'+i)), 1)
+		if err := q.Put(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := q.Depth(); got != 5 {
+		t.Fatalf("Depth = %d, want 5", got)
+	}
+
+	// An unreadable job file must not make Depth fail or block.
+	unreadable := filepath.Join(q.dir, "unreadable.json")
+	if err := os.WriteFile(unreadable, []byte("{"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(unreadable, 0o644)
+	if got := q.Depth(); got < 5 {
+		t.Fatalf("Depth = %d, want at least 5 — an unreadable file must not break counting", got)
+	}
+}
+
+// Jobs that exhausted their retries stay countable after a restart, so the
+// status endpoint can keep reporting them.
+func TestQueueFailedCountSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+
+	q1, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q1.Put(job(refA, 1)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := q1.Claim(time.Now())
+	claimed.LastError = "boom"
+	if err := q1.Fail(claimed); err != nil {
+		t.Fatal(err)
+	}
+	if got := q1.FailedDepth(); got != 1 {
+		t.Fatalf("FailedDepth = %d, want 1", got)
+	}
+
+	q2, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q2.FailedDepth(); got != 1 {
+		t.Fatalf("FailedDepth after restart = %d, want 1 — failures must stay visible", got)
+	}
 }

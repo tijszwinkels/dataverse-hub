@@ -56,13 +56,23 @@ type Event struct {
 
 // Status is the snapshot served by GET /freenet/status.
 type Status struct {
-	Enabled    bool    `json:"enabled"`
-	QueueDepth int     `json:"queue_depth"`
-	InFlight   int     `json:"in_flight"`
-	Succeeded  uint64  `json:"succeeded"`
-	Failed     uint64  `json:"failed"`
-	LastError  string  `json:"last_error"`
-	Recent     []Event `json:"recent"`
+	Enabled    bool   `json:"enabled"`
+	QueueDepth int    `json:"queue_depth"`
+	InFlight   int    `json:"in_flight"`
+	Succeeded  uint64 `json:"succeeded"`
+	Failed     uint64 `json:"failed"`
+	// FailedQueued counts jobs sitting in failed/ awaiting an operator. Read
+	// from disk, so unlike the Failed counter it survives a restart.
+	FailedQueued int `json:"failed_queued"`
+	// Dropped counts objects that could not even be enqueued (e.g. the queue
+	// filesystem is full or read-only). The client's write still succeeded, so
+	// this is the only place such a loss is visible.
+	Dropped uint64 `json:"dropped"`
+	// LastError is a short summary, deliberately without the publisher's raw
+	// output — see handleFreenetStatus for who can read this. The full detail
+	// is in the hub log and the failed/ job file.
+	LastError string  `json:"last_error"`
+	Recent    []Event `json:"recent"`
 }
 
 // Mirror asynchronously republishes accepted public objects to Freenet.
@@ -88,6 +98,7 @@ type Mirror struct {
 	inFlight  *Job
 	succeeded uint64
 	failed    uint64
+	dropped   uint64
 	lastError string
 	recent    []Event
 }
@@ -188,10 +199,17 @@ func (m *Mirror) Publish(ref string, revision int, realms object.InField, envelo
 		Envelope:   json.RawMessage(buf),
 	}
 	if err := m.q.Put(j); err != nil {
-		log.Printf("[freenet] ERROR: enqueue %s rev %d: %v", ref, revision, err)
+		// The client's write already succeeded, so this mirror is simply lost.
+		// Surface it loudly — the status endpoint is the only place an operator
+		// can see it, since there is no queue file to find.
+		log.Printf("[freenet] ERROR: enqueue %s rev %d failed, mirror DROPPED: %v", ref, revision, err)
+		m.drop(j, err)
 		return
 	}
-	log.Printf("[freenet] queued %s rev %d (depth: %d)", ref, revision, m.q.Depth())
+	// Note: no queue depth here. This runs inline on the HTTP write path, and
+	// counting the queue on every write would make a backlog cost every client.
+	// The worker logs depth instead.
+	log.Printf("[freenet] queued %s rev %d", ref, revision)
 	m.wake()
 }
 
@@ -211,13 +229,15 @@ func (m *Mirror) Status() Status {
 	copy(recent, m.recent)
 
 	return Status{
-		Enabled:    true,
-		QueueDepth: m.q.Depth(),
-		InFlight:   inFlight,
-		Succeeded:  m.succeeded,
-		Failed:     m.failed,
-		LastError:  m.lastError,
-		Recent:     recent,
+		Enabled:      true,
+		QueueDepth:   m.q.Depth(),
+		InFlight:     inFlight,
+		Succeeded:    m.succeeded,
+		Failed:       m.failed,
+		FailedQueued: m.q.FailedDepth(),
+		Dropped:      m.dropped,
+		LastError:    m.lastError,
+		Recent:       recent,
 	}
 }
 
@@ -265,8 +285,8 @@ func (m *Mirror) publish(j *Job) {
 
 	switch {
 	case err == nil:
-		log.Printf("[freenet] published %s rev %d in %s (attempt %d)",
-			j.Ref, j.Revision, elapsed.Round(time.Millisecond), j.Attempts+1)
+		log.Printf("[freenet] published %s rev %d in %s (attempt %d, %d still queued)",
+			j.Ref, j.Revision, elapsed.Round(time.Millisecond), j.Attempts+1, m.q.Depth())
 		if err := m.q.Done(j); err != nil {
 			log.Printf("[freenet] WARN: dequeue %s: %v", j.Ref, err)
 		}
@@ -281,14 +301,17 @@ func (m *Mirror) publish(j *Job) {
 
 	default:
 		j.Attempts++
+		// The job file and the log get the publisher's output; the status
+		// surface gets the error summary only (see fail/retry below).
 		j.LastError = describeFailure(err, output)
+		summary := err.Error()
 		if j.Attempts > m.retries {
 			log.Printf("[freenet] ERROR: giving up on %s rev %d after %d attempt(s): %v\n%s",
 				j.Ref, j.Revision, j.Attempts, err, output)
 			if err := m.q.Fail(j); err != nil {
 				log.Printf("[freenet] WARN: record failed job %s: %v", j.Ref, err)
 			}
-			m.fail(j, elapsed)
+			m.fail(j, elapsed, summary)
 			return
 		}
 		backoff := m.backoffFor(j.Attempts)
@@ -298,7 +321,7 @@ func (m *Mirror) publish(j *Job) {
 		if err := m.q.Requeue(j); err != nil {
 			log.Printf("[freenet] WARN: requeue %s: %v", j.Ref, err)
 		}
-		m.retry(j, elapsed)
+		m.retry(j, elapsed, summary)
 	}
 }
 
@@ -338,24 +361,36 @@ func (m *Mirror) succeed(j *Job, d time.Duration) {
 	})
 }
 
-func (m *Mirror) retry(j *Job, d time.Duration) {
+func (m *Mirror) retry(j *Job, d time.Duration, summary string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.lastError = j.LastError
+	m.lastError = summary
 	m.appendEvent(Event{
 		Ref: j.Ref, Revision: j.Revision, Status: "retrying",
-		Attempts: j.Attempts, DurationMS: d.Milliseconds(), At: time.Now(), Error: j.LastError,
+		Attempts: j.Attempts, DurationMS: d.Milliseconds(), At: time.Now(), Error: summary,
 	})
 }
 
-func (m *Mirror) fail(j *Job, d time.Duration) {
+func (m *Mirror) fail(j *Job, d time.Duration, summary string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.failed++
-	m.lastError = j.LastError
+	m.lastError = summary
 	m.appendEvent(Event{
 		Ref: j.Ref, Revision: j.Revision, Status: "failed",
-		Attempts: j.Attempts, DurationMS: d.Milliseconds(), At: time.Now(), Error: j.LastError,
+		Attempts: j.Attempts, DurationMS: d.Milliseconds(), At: time.Now(), Error: summary,
+	})
+}
+
+// drop records a job that never made it onto the queue at all.
+func (m *Mirror) drop(j *Job, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.dropped++
+	m.lastError = "enqueue failed: " + err.Error()
+	m.appendEvent(Event{
+		Ref: j.Ref, Revision: j.Revision, Status: "dropped",
+		At: time.Now(), Error: m.lastError,
 	})
 }
 
