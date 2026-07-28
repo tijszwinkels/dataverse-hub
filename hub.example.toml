@@ -45,6 +45,39 @@
 # DNS TXT record cache TTL for custom domain resolution
 # txt_cache_ttl = "5m"
 
+# Freenet write-through mirror.
+#
+# When enabled, every *public* dataverse001 object this hub accepts is queued
+# and asynchronously republished to Freenet by an external publish command
+# (snapshot PUT -> head PUT -> poke each relation target). Identity-realm,
+# shared-realm and server-public objects are never mirrored.
+#
+# This is write-only: nothing here is ever consulted to serve a read, because a
+# Freenet not-found can stall for minutes.
+#
+# Publishing is irreversible — a snapshot is public and permanent. Leave this
+# off unless you mean it.
+#
+# [freenet]
+# enabled = false
+#
+# Absolute path to the publish command. Run directly, never through a shell,
+# and given exactly one argument: the path to a file holding the envelope.
+# publish_cmd = "/opt/freenet/scripts/publish-v2.sh"
+#
+# Where pending/inflight/failed mirror jobs live.
+# Defaults to <store_dir>/freenet-queue.
+# queue_dir = "./dataverse001/freenet-queue"
+#
+# Wall-clock budget for one publish, as a Go duration string. On expiry the
+# command and its whole process group are killed.
+# timeout = "15m"
+#
+# Retry attempts *after* the initial one, with exponential backoff (30s
+# doubling, capped at 10m). retries = 3 means up to 4 publish attempts.
+# Publishes are idempotent, so retrying is always safe.
+# retries = 3
+
 # Shared realms — grant a group of pubkeys shared read access to objects.
 # Realm names conventionally use "{owner-pubkey}.{Name}" but any string works.
 # Edit and send SIGHUP to reload without restart.

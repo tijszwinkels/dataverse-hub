@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -28,6 +29,19 @@ type Config struct {
 	BaseDomain  string        // e.g. "dataverse001.net", required for "redirect" and "isolate"
 	VhostMode   string        // "off", "redirect", or "isolate"
 	TxtCacheTTL time.Duration // TXT record cache TTL (default: 5m)
+
+	Freenet FreenetConfig // write-through Freenet mirror (off by default)
+}
+
+// FreenetConfig configures the write-through Freenet mirror. Disabled by
+// default: with Enabled false the hub behaves exactly as it did before this
+// feature existed, and nothing is ever handed to an external command.
+type FreenetConfig struct {
+	Enabled    bool
+	PublishCmd string        // absolute path to the publish script (e.g. publish-v2.sh)
+	QueueDir   string        // defaults to <store_dir>/freenet-queue
+	Timeout    time.Duration // per-publish wall-clock budget (default: 15m)
+	Retries    int           // retry attempts after the initial one (default: 3)
 }
 
 // fileConfig mirrors Config but with pointer fields so we can distinguish
@@ -47,12 +61,22 @@ type fileConfig struct {
 	VhostMode        *string `toml:"vhost_mode"`
 	TxtCacheTTL      *string `toml:"txt_cache_ttl"`
 
-	Realms map[string]realmConfig `toml:"realms"`
+	Realms  map[string]realmConfig `toml:"realms"`
+	Freenet *freenetFileConfig     `toml:"freenet"`
 }
 
 // realmConfig holds the config for a single shared realm.
 type realmConfig struct {
 	Members []string `toml:"members"`
+}
+
+// freenetFileConfig is the [freenet] TOML section.
+type freenetFileConfig struct {
+	Enabled    *bool   `toml:"enabled"`
+	PublishCmd *string `toml:"publish_cmd"`
+	QueueDir   *string `toml:"queue_dir"`
+	Timeout    *string `toml:"timeout"`
+	Retries    *int    `toml:"retries"`
 }
 
 // loadConfig builds the final Config by layering: defaults < TOML file < env vars.
@@ -62,7 +86,28 @@ func loadConfig() (Config, string) {
 	flag.Parse()
 
 	// 1. Defaults
-	cfg := Config{
+	cfg := defaultConfig()
+
+	// 2. TOML file (if provided)
+	if *configPath != "" {
+		if err := applyFile(&cfg, *configPath); err != nil {
+			log.Fatalf("Failed to load config file %s: %v", *configPath, err)
+		}
+		log.Printf("Loaded config from %s", *configPath)
+	}
+
+	// 3. Env vars override
+	applyEnv(&cfg)
+
+	// 4. Defaults that depend on other settled values
+	resolveFreenetDefaults(&cfg)
+
+	return cfg, *configPath
+}
+
+// defaultConfig returns the built-in defaults, before file and env layering.
+func defaultConfig() Config {
+	return Config{
 		Mode:             "proxy",
 		UpstreamURL:      "https://dataverse001.net",
 		UpstreamPush:     "public",
@@ -76,20 +121,21 @@ func loadConfig() (Config, string) {
 		BaseDomain:       "localhost",
 		VhostMode:        "isolate",
 		TxtCacheTTL:      5 * time.Minute,
+		Freenet: FreenetConfig{
+			Enabled: false, // explicit: the mirror never turns itself on
+			Timeout: 15 * time.Minute,
+			Retries: 3,
+		},
 	}
+}
 
-	// 2. TOML file (if provided)
-	if *configPath != "" {
-		if err := applyFile(&cfg, *configPath); err != nil {
-			log.Fatalf("Failed to load config file %s: %v", *configPath, err)
-		}
-		log.Printf("Loaded config from %s", *configPath)
+// resolveFreenetDefaults fills in the queue dir, which defaults to a
+// subdirectory of the store dir and so can only be settled once store_dir is
+// final.
+func resolveFreenetDefaults(cfg *Config) {
+	if cfg.Freenet.QueueDir == "" {
+		cfg.Freenet.QueueDir = filepath.Join(cfg.StoreDir, "freenet-queue")
 	}
-
-	// 3. Env vars override
-	applyEnv(&cfg)
-
-	return cfg, *configPath
 }
 
 // loadRealmsFromFile parses the TOML config and returns the shared realm map.
@@ -146,11 +192,7 @@ func applyFile(cfg *Config, path string) error {
 		cfg.BackupEnabled = *fc.BackupEnabled
 	}
 	if fc.AuthTokenExpiry != nil {
-		if d, err := time.ParseDuration(*fc.AuthTokenExpiry); err == nil {
-			cfg.AuthTokenExpiry = d
-		} else {
-			log.Printf("WARN: invalid auth_token_expiry=%q, keeping %v", *fc.AuthTokenExpiry, cfg.AuthTokenExpiry)
-		}
+		cfg.AuthTokenExpiry = parseDurationOr("auth_token_expiry", *fc.AuthTokenExpiry, cfg.AuthTokenExpiry)
 	}
 	if fc.BaseDomain != nil {
 		cfg.BaseDomain = *fc.BaseDomain
@@ -159,14 +201,38 @@ func applyFile(cfg *Config, path string) error {
 		cfg.VhostMode = *fc.VhostMode
 	}
 	if fc.TxtCacheTTL != nil {
-		if d, err := time.ParseDuration(*fc.TxtCacheTTL); err == nil {
-			cfg.TxtCacheTTL = d
-		} else {
-			log.Printf("WARN: invalid txt_cache_ttl=%q, keeping %v", *fc.TxtCacheTTL, cfg.TxtCacheTTL)
+		cfg.TxtCacheTTL = parseDurationOr("txt_cache_ttl", *fc.TxtCacheTTL, cfg.TxtCacheTTL)
+	}
+	if fn := fc.Freenet; fn != nil {
+		if fn.Enabled != nil {
+			cfg.Freenet.Enabled = *fn.Enabled
+		}
+		if fn.PublishCmd != nil {
+			cfg.Freenet.PublishCmd = *fn.PublishCmd
+		}
+		if fn.QueueDir != nil {
+			cfg.Freenet.QueueDir = *fn.QueueDir
+		}
+		if fn.Timeout != nil {
+			cfg.Freenet.Timeout = parseDurationOr("freenet.timeout", *fn.Timeout, cfg.Freenet.Timeout)
+		}
+		if fn.Retries != nil {
+			cfg.Freenet.Retries = *fn.Retries
 		}
 	}
 
 	return nil
+}
+
+// parseDurationOr parses a Go duration string, keeping (and warning about)
+// the current value if it is malformed.
+func parseDurationOr(name, value string, current time.Duration) time.Duration {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		log.Printf("WARN: invalid %s=%q, keeping %v", name, value, current)
+		return current
+	}
+	return d
 }
 
 func applyEnv(cfg *Config) {
@@ -206,11 +272,7 @@ func applyEnv(cfg *Config) {
 		cfg.BackupEnabled = v == "true"
 	}
 	if v := os.Getenv("HUB_AUTH_TOKEN_EXPIRY"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			cfg.AuthTokenExpiry = d
-		} else {
-			log.Printf("WARN: invalid HUB_AUTH_TOKEN_EXPIRY=%q, keeping %v", v, cfg.AuthTokenExpiry)
-		}
+		cfg.AuthTokenExpiry = parseDurationOr("HUB_AUTH_TOKEN_EXPIRY", v, cfg.AuthTokenExpiry)
 	}
 	if v := os.Getenv("HUB_BASE_DOMAIN"); v != "" {
 		cfg.BaseDomain = v
@@ -219,10 +281,25 @@ func applyEnv(cfg *Config) {
 		cfg.VhostMode = v
 	}
 	if v := os.Getenv("HUB_TXT_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			cfg.TxtCacheTTL = d
+		cfg.TxtCacheTTL = parseDurationOr("HUB_TXT_CACHE_TTL", v, cfg.TxtCacheTTL)
+	}
+	if v := os.Getenv("HUB_FREENET_ENABLED"); v != "" {
+		cfg.Freenet.Enabled = v == "true"
+	}
+	if v := os.Getenv("HUB_FREENET_PUBLISH_CMD"); v != "" {
+		cfg.Freenet.PublishCmd = v
+	}
+	if v := os.Getenv("HUB_FREENET_QUEUE_DIR"); v != "" {
+		cfg.Freenet.QueueDir = v
+	}
+	if v := os.Getenv("HUB_FREENET_TIMEOUT"); v != "" {
+		cfg.Freenet.Timeout = parseDurationOr("HUB_FREENET_TIMEOUT", v, cfg.Freenet.Timeout)
+	}
+	if v := os.Getenv("HUB_FREENET_RETRIES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			cfg.Freenet.Retries = n
 		} else {
-			log.Printf("WARN: invalid HUB_TXT_CACHE_TTL=%q, keeping %v", v, cfg.TxtCacheTTL)
+			log.Printf("WARN: invalid HUB_FREENET_RETRIES=%q, keeping %d", v, cfg.Freenet.Retries)
 		}
 	}
 
