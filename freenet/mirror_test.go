@@ -2,7 +2,10 @@ package freenet
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -492,5 +495,76 @@ func TestMirrorStatusDoesNotLeakPublisherOutput(t *testing.T) {
 	}
 	if !strings.Contains(recorded.LastError, "fake-publish") {
 		t.Errorf("failed job file should keep the publisher output, got %q", recorded.LastError)
+	}
+}
+
+// Drops must not be evicted from the status surface by ordinary job events —
+// they are the only trace of a mirror that was lost entirely.
+func TestMirrorDroppedRefsAreNotEvictedByOtherEvents(t *testing.T) {
+	m, _ := testMirror(t, 3)
+
+	m.drop(&Job{Ref: refA, Revision: 1}, errors.New("disk full"))
+	for i := 0; i < maxRecentEvents*2; i++ {
+		m.record(Event{Ref: refB, Status: "succeeded"})
+	}
+
+	st := m.Status()
+	if st.Dropped != 1 {
+		t.Fatalf("Dropped = %d, want 1", st.Dropped)
+	}
+	if len(st.DroppedRefs) != 1 || st.DroppedRefs[0].Ref != refA {
+		t.Fatalf("DroppedRefs = %+v, want the dropped ref to survive a busy event ring", st.DroppedRefs)
+	}
+}
+
+// Status is readable by anyone who can complete the public challenge flow, so
+// it must not carry filesystem paths or other internal detail.
+func TestStatusSummaryIsSanitized(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"shutdown", fmt.Errorf("%w: context canceled", ErrAborted), "publish aborted by shutdown"},
+		{"timeout", fmt.Errorf("%w after 15m0s", ErrTimeout), "publish timed out"},
+		{"internal error with a path", fmt.Errorf("freenet publisher temp file: open /srv/hub/queue/tmp/x: permission denied"), "publish failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := statusSummary(tc.err)
+			if got != tc.want {
+				t.Errorf("statusSummary = %q, want %q", got, tc.want)
+			}
+			if strings.Contains(got, "/") {
+				t.Errorf("statusSummary %q contains a path", got)
+			}
+		})
+	}
+
+	// A non-zero exit is safe and useful to report precisely.
+	cmd := exec.Command("/bin/sh", "-c", "exit 7")
+	exitErr := cmd.Run()
+	if got := statusSummary(fmt.Errorf("publish command failed: %w", exitErr)); got != "publish command exited 7" {
+		t.Errorf("statusSummary = %q, want the exit code named", got)
+	}
+}
+
+// End-to-end: a publisher failure whose error mentions a path must not put that
+// path into the status payload.
+func TestMirrorStatusErrorHasNoFilesystemPaths(t *testing.T) {
+	t.Setenv("FAKE_PUBLISH_EXIT", "3")
+	m, _ := testMirror(t, 0)
+	m.Start()
+	defer m.Stop()
+
+	m.Publish(refA, 1, publicRealms, envelopeFor(1))
+	waitFor(t, "the mirror to give up", func() bool { return m.Status().Failed == 1 })
+
+	st := m.Status()
+	if strings.Contains(st.LastError, "/") {
+		t.Errorf("last_error %q contains a filesystem path", st.LastError)
+	}
+	if st.LastError != "publish command exited 3" {
+		t.Errorf("last_error = %q, want the sanitized category", st.LastError)
 	}
 }

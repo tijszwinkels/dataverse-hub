@@ -436,8 +436,8 @@ func TestQueueDepthDoesNotReadJobBodies(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chmod(unreadable, 0o644)
-	if got := q.Depth(); got < 5 {
-		t.Fatalf("Depth = %d, want at least 5 — an unreadable file must not break counting", got)
+	if got := q.Depth(); got != 5 {
+		t.Fatalf("Depth = %d, want 5 — an unreadable stray file must not break counting", got)
 	}
 }
 
@@ -468,5 +468,66 @@ func TestQueueFailedCountSurvivesRestart(t *testing.T) {
 	}
 	if got := q2.FailedDepth(); got != 1 {
 		t.Fatalf("FailedDepth after restart = %d, want 1 — failures must stay visible", got)
+	}
+}
+
+// The lock that fixes the revision-loss race must not put a full queue scan in
+// the write path's way: Claim decoding every queued envelope while holding the
+// lock Put needs would let a backlog delay client writes.
+func TestQueueClaimDoesNotScanWholeQueue(t *testing.T) {
+	q := testQueue(t)
+
+	// 400 jobs of ~20 KiB each: decoding them all per claim would be ~8 MiB of
+	// JSON per cycle, and 200 cycles would take many seconds.
+	big := make([]byte, 20<<10)
+	for i := range big {
+		big[i] = 'x'
+	}
+	const jobs = 400
+	for i := 0; i < jobs; i++ {
+		j := job(refWithSuffix(i), 1)
+		j.Envelope = json.RawMessage(`{"blob":"` + string(big) + `"}`)
+		if err := q.Put(j); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := time.Now()
+	for i := 0; i < 200; i++ {
+		claimed, err := q.Claim(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claimed == nil {
+			t.Fatalf("Claim %d returned nil with %d jobs queued", i, q.Depth())
+		}
+		if err := q.Requeue(claimed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("200 claim/requeue cycles over %d queued jobs took %v — Claim is scanning the whole queue", jobs, elapsed)
+	}
+}
+
+// refWithSuffix builds distinct valid refs for bulk tests.
+func refWithSuffix(i int) string {
+	hex := "0123456789abcdef"
+	suffix := string([]byte{hex[(i>>8)&0xf], hex[(i>>4)&0xf], hex[i&0xf]})
+	return refA[:len(refA)-3] + suffix
+}
+
+// A job that could not be moved into failed/ stays in inflight/ and must
+// remain countable, not silently disappear.
+func TestQueueInflightDepthExposesStrandedJobs(t *testing.T) {
+	q := testQueue(t)
+	if err := q.Put(job(refA, 1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Claim(time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.InflightDepth(); got != 1 {
+		t.Fatalf("InflightDepth = %d, want 1", got)
 	}
 }

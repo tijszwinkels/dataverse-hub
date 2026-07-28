@@ -451,11 +451,13 @@ GET /freenet/status        (authentication required; 404 when the mirror is disa
   "enabled": true,
   "queue_depth": 0,
   "in_flight": 0,
+  "inflight_queued": 0,
   "succeeded": 12,
   "failed": 1,
   "failed_queued": 1,
   "dropped": 0,
-  "last_error": "publish command failed: exit status 1",
+  "last_error": "publish command exited 1",
+  "dropped_refs": [],
   "recent": [
     {"ref": "<pubkey>.<uuid>", "revision": 3, "status": "succeeded",
      "attempts": 1, "duration_ms": 48213, "at": "2026-07-28T12:00:00Z"}
@@ -466,10 +468,20 @@ GET /freenet/status        (authentication required; 404 when the mirror is disa
 - `failed` counts give-ups by *this* process; `failed_queued` counts the job
   files still sitting in `failed/`, so a failure does not disappear when the hub
   is restarted.
-- `dropped` counts objects that could not be enqueued at all (a full or
-  read-only `queue_dir`). The client's write succeeded and there is no queue
-  file to find, so this counter is the only place such a loss is visible —
-  alarm on it.
+- `inflight_queued` counts job files under `inflight/`. It is 1 during a
+  publish. If it stays above `in_flight`, a job was stranded there and needs an
+  operator.
+- `dropped` / `dropped_refs` count objects that could not be enqueued at all (a
+  full or read-only `queue_dir`). The client's write succeeded and there is no
+  queue file to find, so this is the only place such a loss is visible — **alarm
+  on it.** `dropped_refs` is kept separate from `recent` so ordinary job traffic
+  cannot evict it, but it is still in-memory only: when the queue filesystem is
+  unwritable there is by definition nowhere durable to record the loss, so the
+  hub log (`ERROR: enqueue <ref> rev N failed, mirror DROPPED`) is the record
+  that survives a restart.
+- `last_error` is a sanitized category — `publish timed out`, `publish command
+  exited 3`, `enqueue failed`. It never contains a filesystem path or the
+  publisher's output; see the authorization note below.
 
 The route is registered only when the mirror is enabled; a hub with
 `enabled = false` returns 404, exactly as it did before this feature existed.

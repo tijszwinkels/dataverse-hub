@@ -3,6 +3,7 @@ package freenet
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,14 @@ type Job struct {
 	Envelope      json.RawMessage `json:"envelope"`
 }
 
+// pendingEntry is the in-memory summary of one pending job — everything Claim
+// needs to choose the next job, without reading the job's envelope.
+type pendingEntry struct {
+	revision      int
+	enqueuedAt    time.Time
+	nextAttemptAt time.Time
+}
+
 // queue is a durable, directory-backed job queue with at-most-one pending job
 // per ref.
 //
@@ -32,6 +41,7 @@ type Job struct {
 //	<dir>/<ref>.json           pending — waiting to be published
 //	<dir>/inflight/<ref>.json  claimed by the worker, publish in progress
 //	<dir>/failed/<ref>.json    gave up after the retry budget (kept for operators)
+//	<dir>/tmp/                 envelopes staged for the publish command
 //
 // Naming the pending file after the ref gives dedupe/supersede for free: a
 // newer revision atomically replaces the queued older one. A claim is a rename
@@ -39,22 +49,32 @@ type Job struct {
 // file instead of being swallowed when the in-flight job completes. Stranded
 // inflight/ files (hub killed mid-publish) are recovered to pending on open.
 type queue struct {
-	// mu serializes every queue operation. The HTTP write path calls Put
-	// while the worker calls Claim/Done/Requeue/Fail, and the read-then-act
-	// sequences inside them (Put's supersede check, Claim's decode-then-
-	// rename) are not atomic on their own: without this lock a Put landing
-	// between Claim's decode and its rename would be renamed into inflight
-	// and then deleted by Done, losing that revision for good.
+	// mu serializes every queue operation. The HTTP write path calls Put while
+	// the worker calls Claim/Done/Requeue/Fail, and the read-then-act sequences
+	// inside them (Put's supersede check, Claim's choose-then-rename) are not
+	// atomic on their own: without this lock a Put landing between Claim's
+	// choice and its rename would be renamed into inflight and then deleted by
+	// Done, losing that revision for good.
+	//
+	// Everything done under this lock is O(1) in disk I/O. `pending` is an
+	// in-memory index precisely so Claim does not have to read the whole queue
+	// while holding the lock that client writes need — a backlog must never
+	// become write-path latency.
 	mu          sync.Mutex
+	pending     map[string]pendingEntry
+	failedCount int
+
 	dir         string
 	inflightDir string
 	failedDir   string
 }
 
-// newQueue opens (creating if needed) the queue directories and recovers any
-// job stranded in inflight/ by an unclean shutdown.
+// newQueue opens (creating if needed) the queue directories, indexes the
+// pending jobs, and recovers any job stranded in inflight/ by an unclean
+// shutdown.
 func newQueue(dir string) (*queue, error) {
 	q := &queue{
+		pending:     make(map[string]pendingEntry),
 		dir:         dir,
 		inflightDir: filepath.Join(dir, "inflight"),
 		failedDir:   filepath.Join(dir, "failed"),
@@ -64,9 +84,11 @@ func newQueue(dir string) (*queue, error) {
 			return nil, fmt.Errorf("freenet queue mkdir %s: %w", d, err)
 		}
 	}
-	if err := q.recoverInflight(); err != nil {
+	if err := q.loadPending(); err != nil {
 		return nil, err
 	}
+	q.failedCount = countJobFiles(q.failedDir)
+	q.recoverInflight()
 	return q, nil
 }
 
@@ -84,42 +106,71 @@ func (q *queue) put(j *Job) error {
 	if !object.IsValidRef(j.Ref) {
 		return fmt.Errorf("freenet queue: refusing job with invalid ref %q", j.Ref)
 	}
-	if existing, err := q.read(q.pendingPath(j.Ref)); err == nil && existing.Revision >= j.Revision {
+	if existing, ok := q.pending[j.Ref]; ok && existing.revision >= j.Revision {
 		return nil
 	}
-	return q.write(q.pendingPath(j.Ref), j)
+	if err := q.write(q.pendingPath(j.Ref), j); err != nil {
+		return err
+	}
+	q.pending[j.Ref] = pendingEntry{
+		revision:      j.Revision,
+		enqueuedAt:    j.EnqueuedAt,
+		nextAttemptAt: j.NextAttemptAt,
+	}
+	return nil
 }
 
 // Claim takes the oldest runnable pending job and moves it to inflight/.
 // Returns (nil, nil) when nothing is runnable — either the queue is empty or
 // every pending job is still waiting out its retry backoff.
+//
+// Candidate selection is pure in-memory work; only the chosen job is touched
+// on disk.
 func (q *queue) Claim(now time.Time) (*Job, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	jobs, err := q.pending()
-	if err != nil {
-		return nil, err
-	}
+	for {
+		ref, ok := q.nextRunnable(now)
+		if !ok {
+			return nil, nil
+		}
+		delete(q.pending, ref)
 
-	var best *Job
-	for _, j := range jobs {
-		if j.NextAttemptAt.After(now) {
+		if err := os.Rename(q.pendingPath(ref), q.inflightPath(ref)); err != nil {
+			return nil, fmt.Errorf("freenet queue claim %s: %w", ref, err)
+		}
+		j, err := q.read(q.inflightPath(ref))
+		if err != nil {
+			// The file vanished or was corrupted underneath us. Park it rather
+			// than wedging the queue, and move on to the next candidate.
+			log.Printf("[freenet] ERROR: unreadable job %s, parking in failed/: %v", ref, err)
+			if renameErr := os.Rename(q.inflightPath(ref), q.failedPath(ref)); renameErr == nil {
+				q.failedCount++
+			} else {
+				log.Printf("[freenet] ERROR: could not park %s: %v", ref, renameErr)
+			}
 			continue
 		}
-		if best == nil || j.EnqueuedAt.Before(best.EnqueuedAt) ||
-			(j.EnqueuedAt.Equal(best.EnqueuedAt) && j.Ref < best.Ref) {
-			best = j
+		return j, nil
+	}
+}
+
+// nextRunnable picks the oldest enqueued job whose backoff has elapsed.
+// Caller must hold q.mu.
+func (q *queue) nextRunnable(now time.Time) (string, bool) {
+	var bestRef string
+	var best pendingEntry
+	for ref, e := range q.pending {
+		if e.nextAttemptAt.After(now) {
+			continue
+		}
+		if bestRef == "" || e.enqueuedAt.Before(best.enqueuedAt) ||
+			(e.enqueuedAt.Equal(best.enqueuedAt) && ref < bestRef) {
+			bestRef, best = ref, e
 		}
 	}
-	if best == nil {
-		return nil, nil
-	}
-
-	if err := os.Rename(q.pendingPath(best.Ref), q.inflightPath(best.Ref)); err != nil {
-		return nil, fmt.Errorf("freenet queue claim %s: %w", best.Ref, err)
-	}
-	return best, nil
+	return bestRef, bestRef != ""
 }
 
 // Done drops a successfully published job.
@@ -138,7 +189,7 @@ func (q *queue) done(j *Job) error {
 }
 
 // Requeue returns an in-flight job to pending for another attempt. A newer
-// revision enqueued while this job was in flight wins — Put's supersede rule
+// revision enqueued while this job was in flight wins — put's supersede rule
 // keeps it and this attempt is simply dropped.
 func (q *queue) Requeue(j *Job) error {
 	q.mu.Lock()
@@ -152,6 +203,10 @@ func (q *queue) Requeue(j *Job) error {
 
 // Fail records a job that exhausted its retries under failed/ so it stays
 // visible to operators instead of vanishing.
+//
+// If the failed/ write fails there is nowhere durable to put it, so the job
+// deliberately stays in inflight/ — InflightDepth keeps it countable and the
+// next start recovers it to pending.
 func (q *queue) Fail(j *Job) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -159,23 +214,30 @@ func (q *queue) Fail(j *Job) error {
 	if err := q.write(q.failedPath(j.Ref), j); err != nil {
 		return err
 	}
+	q.failedCount++
 	return q.done(j)
 }
 
 // Depth counts pending jobs, including those waiting out a retry backoff.
-//
-// It counts directory entries and deliberately does not decode them: Depth is
-// a metric, and decoding every queued envelope to produce it would make a
-// large backlog expensive to observe. A malformed .json file is therefore
-// counted even though Claim will skip it.
 func (q *queue) Depth() int {
-	return countJobFiles(q.dir)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.pending)
 }
 
 // FailedDepth counts jobs that exhausted their retries and are waiting for an
-// operator. Read from disk rather than a counter so it survives a restart.
+// operator. Seeded from disk at open, so it survives a restart.
 func (q *queue) FailedDepth() int {
-	return countJobFiles(q.failedDir)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.failedCount
+}
+
+// InflightDepth counts job files under inflight/. During a publish this is 1.
+// A value that stays above the worker's actual in-flight count means a job was
+// stranded — recovery could not move it — and needs an operator.
+func (q *queue) InflightDepth() int {
+	return countJobFiles(q.inflightDir)
 }
 
 // countJobFiles counts job files in dir without opening them.
@@ -186,68 +248,89 @@ func countJobFiles(dir string) int {
 	}
 	n := 0
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			continue
+		if isJobFile(e) {
+			n++
 		}
-		n++
 	}
 	return n
 }
 
-// pending decodes every readable pending job. Unreadable or malformed files
-// are skipped rather than failing the scan, so one bad file cannot wedge the
-// queue.
-func (q *queue) pending() ([]*Job, error) {
-	entries, err := os.ReadDir(q.dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("freenet queue list: %w", err)
-	}
-
-	var jobs []*Job
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || strings.HasPrefix(name, ".") || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		j, err := q.read(filepath.Join(q.dir, name))
-		if err != nil {
-			continue
-		}
-		jobs = append(jobs, j)
-	}
-	return jobs, nil
+func isJobFile(e os.DirEntry) bool {
+	name := e.Name()
+	return !e.IsDir() && !strings.HasPrefix(name, ".") && strings.HasSuffix(name, ".json")
 }
 
-// recoverInflight moves jobs stranded by an unclean shutdown back to pending.
-func (q *queue) recoverInflight() error {
-	entries, err := os.ReadDir(q.inflightDir)
+// loadPending indexes the pending directory at startup. Unreadable or
+// malformed files are logged and skipped rather than failing the open, so one
+// bad file cannot stop the hub from booting.
+func (q *queue) loadPending() error {
+	entries, err := os.ReadDir(q.dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("freenet queue recover: %w", err)
+		return fmt.Errorf("freenet queue list: %w", err)
 	}
+
 	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+		if !isJobFile(e) {
 			continue
 		}
-		j, err := q.read(filepath.Join(q.inflightDir, name))
+		path := filepath.Join(q.dir, e.Name())
+		j, err := q.read(path)
 		if err != nil {
+			log.Printf("[freenet] WARN: ignoring unreadable queue file %s: %v", path, err)
 			continue
 		}
-		// Put drops it if a newer revision is already pending; either way the
-		// inflight copy goes away.
-		if err := q.put(j); err != nil {
-			continue
+		q.pending[j.Ref] = pendingEntry{
+			revision:      j.Revision,
+			enqueuedAt:    j.EnqueuedAt,
+			nextAttemptAt: j.NextAttemptAt,
 		}
-		os.Remove(filepath.Join(q.inflightDir, name))
 	}
 	return nil
+}
+
+// recoverInflight moves jobs stranded by an unclean shutdown back to pending.
+// A job that cannot be recovered stays in inflight/, where InflightDepth keeps
+// it visible; the failure is logged rather than swallowed.
+func (q *queue) recoverInflight() {
+	entries, err := os.ReadDir(q.inflightDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("[freenet] ERROR: cannot read inflight dir %s: %v", q.inflightDir, err)
+		}
+		return
+	}
+
+	stranded := 0
+	for _, e := range entries {
+		if !isJobFile(e) {
+			continue
+		}
+		path := filepath.Join(q.inflightDir, e.Name())
+		j, err := q.read(path)
+		if err != nil {
+			log.Printf("[freenet] ERROR: stranded inflight job %s is unreadable: %v", path, err)
+			stranded++
+			continue
+		}
+		// put drops it if a newer revision is already pending; either way the
+		// inflight copy goes away.
+		if err := q.put(j); err != nil {
+			log.Printf("[freenet] ERROR: cannot recover inflight job %s, leaving it in place: %v", path, err)
+			stranded++
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			log.Printf("[freenet] WARN: recovered %s but could not remove the inflight copy: %v", j.Ref, err)
+		}
+		log.Printf("[freenet] recovered interrupted job %s rev %d", j.Ref, j.Revision)
+	}
+	if stranded > 0 {
+		log.Printf("[freenet] ERROR: %d job(s) stranded in %s and could not be recovered — they will NOT be published until this is resolved",
+			stranded, q.inflightDir)
+	}
 }
 
 func (q *queue) pendingPath(ref string) string  { return filepath.Join(q.dir, ref+".json") }

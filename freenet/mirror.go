@@ -68,11 +68,27 @@ type Status struct {
 	// filesystem is full or read-only). The client's write still succeeded, so
 	// this is the only place such a loss is visible.
 	Dropped uint64 `json:"dropped"`
-	// LastError is a short summary, deliberately without the publisher's raw
-	// output — see handleFreenetStatus for who can read this. The full detail
-	// is in the hub log and the failed/ job file.
-	LastError string  `json:"last_error"`
-	Recent    []Event `json:"recent"`
+	// InflightQueued counts job files under inflight/. During a publish this is
+	// 1. A value that stays above in_flight means a job was stranded there and
+	// needs an operator.
+	InflightQueued int `json:"inflight_queued"`
+	// LastError is a sanitized category, deliberately without the publisher's
+	// raw output or any filesystem path — see handleFreenetStatus for who can
+	// read this. The full detail is in the hub log and the failed/ job file.
+	LastError string `json:"last_error"`
+	// DroppedRefs lists the most recent objects that could not be enqueued.
+	// Kept separately from Recent so ordinary job traffic cannot evict the only
+	// record of a lost mirror.
+	DroppedRefs []Drop  `json:"dropped_refs"`
+	Recent      []Event `json:"recent"`
+}
+
+// Drop is one object the mirror could not enqueue at all.
+type Drop struct {
+	Ref      string    `json:"ref"`
+	Revision int       `json:"revision"`
+	At       time.Time `json:"at"`
+	Error    string    `json:"error"`
 }
 
 // Mirror asynchronously republishes accepted public objects to Freenet.
@@ -94,13 +110,14 @@ type Mirror struct {
 	wg     sync.WaitGroup
 	once   sync.Once
 
-	mu        sync.Mutex
-	inFlight  *Job
-	succeeded uint64
-	failed    uint64
-	dropped   uint64
-	lastError string
-	recent    []Event
+	mu          sync.Mutex
+	inFlight    *Job
+	succeeded   uint64
+	failed      uint64
+	dropped     uint64
+	lastError   string
+	recent      []Event
+	droppedRefs []Drop
 }
 
 // New validates the configuration and opens the on-disk queue, recovering any
@@ -216,7 +233,7 @@ func (m *Mirror) Publish(ref string, revision int, realms object.InField, envelo
 // Status reports the mirror's state. Safe on a nil (disabled) mirror.
 func (m *Mirror) Status() Status {
 	if m == nil {
-		return Status{Recent: []Event{}}
+		return Status{Recent: []Event{}, DroppedRefs: []Drop{}}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -227,17 +244,21 @@ func (m *Mirror) Status() Status {
 	}
 	recent := make([]Event, len(m.recent))
 	copy(recent, m.recent)
+	droppedRefs := make([]Drop, len(m.droppedRefs))
+	copy(droppedRefs, m.droppedRefs)
 
 	return Status{
-		Enabled:      true,
-		QueueDepth:   m.q.Depth(),
-		InFlight:     inFlight,
-		Succeeded:    m.succeeded,
-		Failed:       m.failed,
-		FailedQueued: m.q.FailedDepth(),
-		Dropped:      m.dropped,
-		LastError:    m.lastError,
-		Recent:       recent,
+		Enabled:        true,
+		QueueDepth:     m.q.Depth(),
+		InFlight:       inFlight,
+		Succeeded:      m.succeeded,
+		Failed:         m.failed,
+		FailedQueued:   m.q.FailedDepth(),
+		InflightQueued: m.q.InflightDepth(),
+		Dropped:        m.dropped,
+		LastError:      m.lastError,
+		DroppedRefs:    droppedRefs,
+		Recent:         recent,
 	}
 }
 
@@ -304,7 +325,7 @@ func (m *Mirror) publish(j *Job) {
 		// The job file and the log get the publisher's output; the status
 		// surface gets the error summary only (see fail/retry below).
 		j.LastError = describeFailure(err, output)
-		summary := err.Error()
+		summary := statusSummary(err)
 		if j.Attempts > m.retries {
 			log.Printf("[freenet] ERROR: giving up on %s rev %d after %d attempt(s): %v\n%s",
 				j.Ref, j.Revision, j.Attempts, err, output)
@@ -387,11 +408,17 @@ func (m *Mirror) drop(j *Job, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dropped++
-	m.lastError = "enqueue failed: " + err.Error()
+	m.lastError = "enqueue failed"
 	m.appendEvent(Event{
 		Ref: j.Ref, Revision: j.Revision, Status: "dropped",
 		At: time.Now(), Error: m.lastError,
 	})
+	m.droppedRefs = append([]Drop{{
+		Ref: j.Ref, Revision: j.Revision, At: time.Now(), Error: m.lastError,
+	}}, m.droppedRefs...)
+	if len(m.droppedRefs) > maxRecentEvents {
+		m.droppedRefs = m.droppedRefs[:maxRecentEvents]
+	}
 }
 
 // record appends an event. Callers hold no lock.

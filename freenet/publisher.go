@@ -16,6 +16,9 @@ import (
 // without spending a retry attempt on it.
 var ErrAborted = errors.New("publish aborted")
 
+// ErrTimeout marks a publish killed for exceeding its wall-clock budget.
+var ErrTimeout = errors.New("publish command timed out")
+
 // maxOutputBytes caps how much publisher output is kept for logs and the
 // status endpoint. The real publisher prints a per-target poke report, which
 // is small; a runaway script must not be able to balloon hub memory.
@@ -76,7 +79,7 @@ func (p *execPublisher) Publish(ctx context.Context, j *Job) (string, error) {
 		// The hub is shutting down — not the publisher's fault.
 		return output, fmt.Errorf("%w: %v", ErrAborted, ctx.Err())
 	case errors.Is(runCtx.Err(), context.DeadlineExceeded):
-		return output, fmt.Errorf("publish command timed out after %s", p.timeout)
+		return output, fmt.Errorf("%w after %s", ErrTimeout, p.timeout)
 	case runErr != nil:
 		return output, fmt.Errorf("publish command failed: %w", runErr)
 	}
@@ -171,4 +174,28 @@ func (t *tailBuffer) String() string {
 		return "… (earlier output truncated)\n" + string(t.buf)
 	}
 	return string(t.buf)
+}
+
+// statusSummary reduces an error to a stable, path-free category safe to serve
+// from GET /freenet/status.
+//
+// That endpoint is readable by anyone who can complete the public challenge
+// flow, and raw errors from this package routinely embed absolute paths
+// (queue_dir, the staging tmp dir). The full error stays in the hub log and in
+// the failed/ job file, both of which need filesystem access to read.
+func statusSummary(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrAborted):
+		return "publish aborted by shutdown"
+	case errors.Is(err, ErrTimeout):
+		return "publish timed out"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		// An exit code is the publisher's own contract and carries no internals.
+		return fmt.Sprintf("publish command exited %d", exitErr.ExitCode())
+	}
+	return "publish failed"
 }
