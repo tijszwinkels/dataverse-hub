@@ -311,6 +311,10 @@ func (h *Hub) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
+	// Queue the Freenet mirror. No-op when disabled; drops anything that is
+	// not a public dataverse001 object; never blocks on or fails the write.
+	h.Mirror.Publish(ref, item.Revision, realms, canonical)
+
 	// Advertise the new revision so clients can chain a subsequent
 	// conditional write with If-Match.
 	w.Header().Set("ETag", revisionETag(item.Revision))

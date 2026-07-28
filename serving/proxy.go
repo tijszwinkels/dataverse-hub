@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/freenet"
 	"github.com/tijszwinkels/dataverse-hub/object"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -32,6 +33,7 @@ type Proxy struct {
 	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 	VhostMode        string
+	Mirror           *freenet.Mirror // nil = Freenet mirroring disabled
 
 	// UpstreamPush controls which objects are forwarded to upstream on PUT.
 	// "public" (default) — only dataverse001 objects are forwarded.
@@ -88,6 +90,9 @@ func (p *Proxy) Router() http.Handler {
 	r.Get("/auth/realms", handleAuthRealms(p.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(p.Vhost))
+	r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
+		handleFreenetStatus(w, r, p.Mirror)
+	})
 	r.Get("/", p.handleRoot)
 	// Root representation aliases (see resolveRootTarget / Hub.Router).
 	r.Get("/json", p.handleRootJSON)
@@ -397,6 +402,9 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 			p.Vhost.AddPage(ref)
 		}
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
+
+		// Queue the Freenet mirror (see Hub.handlePutObject for the contract).
+		p.Mirror.Publish(ref, item.Revision, realms, canonical)
 
 		// Advertise the new revision so clients can chain a conditional write.
 		w.Header().Set("ETag", revisionETag(item.Revision))
@@ -1018,6 +1026,12 @@ func (p *Proxy) storeLocallyWithPending(w http.ResponseWriter, r *http.Request, 
 		p.Vhost.AddPage(ref)
 	}
 	log.Printf("[proxy] stored %s rev %d (%s) (sync pending)", ref, item.Revision, item.Type)
+
+	// Queue the Freenet mirror. Upstream is down, but this hub has accepted
+	// and durably stored the object, so it is mirrorable now; the snapshot is
+	// signed and the publish is idempotent, so a later upstream conflict
+	// costs nothing.
+	p.Mirror.Publish(ref, item.Revision, realms, canonical)
 
 	// 202 Accepted — stored locally, sync pending
 	w.Header().Set("ETag", revisionETag(item.Revision))

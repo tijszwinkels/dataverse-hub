@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/freenet"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/serving"
 	"github.com/tijszwinkels/dataverse-hub/storage"
@@ -68,6 +69,30 @@ func main() {
 		log.Printf("Vhost disabled: vhost_mode=off")
 	}
 
+	// Freenet write-through mirror. Nil unless explicitly enabled, and a nil
+	// mirror is a no-op at every call site — so a hub with no [freenet]
+	// section behaves exactly as it did before this feature existed.
+	var mirror *freenet.Mirror
+	if cfg.Freenet.Enabled {
+		mirror, err = freenet.New(freenet.Options{
+			QueueDir:   cfg.Freenet.QueueDir,
+			PublishCmd: cfg.Freenet.PublishCmd,
+			Timeout:    cfg.Freenet.Timeout,
+			Retries:    cfg.Freenet.Retries,
+		})
+		if err != nil {
+			// Refuse to start rather than run a hub that silently mirrors
+			// nothing: enabling this and having it quietly not work is worse
+			// than not starting.
+			log.Fatalf("Freenet mirror is enabled but unusable: %v", err)
+		}
+		mirror.Start()
+		log.Printf("Freenet mirror enabled: cmd=%s queue=%s timeout=%v retries=%d",
+			cfg.Freenet.PublishCmd, cfg.Freenet.QueueDir, cfg.Freenet.Timeout, cfg.Freenet.Retries)
+	} else {
+		log.Printf("Freenet mirror disabled")
+	}
+
 	limiter := auth.NewRateLimiter(cfg.RateLimitPerMin, cfg.RateLimitPerDay)
 	defer limiter.Stop()
 
@@ -84,6 +109,7 @@ func main() {
 		hub := serving.NewHub(store, index, limiter, authStore, cfg.DefaultViewerRef, shared)
 		hub.Vhost = resolver
 		hub.VhostMode = cfg.VhostMode
+		hub.Mirror = mirror
 		handler = hub.Router()
 
 	default: // "proxy" is the default
@@ -109,6 +135,7 @@ func main() {
 		proxy.UpstreamPush = cfg.UpstreamPush
 		proxy.Vhost = resolver
 		proxy.VhostMode = cfg.VhostMode
+		proxy.Mirror = mirror
 		handler = proxy.Router()
 	}
 
@@ -161,6 +188,10 @@ func main() {
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("Shutdown error: %v", err)
 		}
+		// After the listener drains, so a request still in flight can still
+		// queue its mirror. Cancels any running publish (killing its process
+		// group) and leaves the job queued for the next boot.
+		mirror.Stop()
 		close(done)
 	}()
 
