@@ -437,7 +437,7 @@ func (q *queue) write(path string, j *Job) error {
 	// dropped while it is in fact sitting in the queue, which is strictly
 	// worse. Log it loudly and report success.
 	if err := syncDirFn(dir); err != nil {
-		log.Printf("[freenet] ERROR: %v — %s is queued and will be processed, but may not survive a host power loss", err, j.Ref)
+		log.Printf("[freenet] ERROR: %v — the record for %s is written to %s and is live, but may not survive a host power loss", err, j.Ref, dir)
 	}
 	return nil
 }
