@@ -428,11 +428,22 @@ func (q *queue) write(path string, j *Job) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("freenet queue rename: %w", err)
 	}
-	// Syncing the file is not enough: the rename that publishes it is a
-	// directory operation, and without this a host power-loss can lose the
-	// directory entry even though Put returned success (fsync(2)).
-	return syncDir(dir)
+
+	// The rename has committed the file: it is live, and every caller's
+	// in-memory bookkeeping must now match the filesystem. Syncing the
+	// directory is what additionally makes it survive a host power-loss
+	// (fsync(2)), so a failure here degrades durability without invalidating
+	// the write — returning an error would make callers record a job as
+	// dropped while it is in fact sitting in the queue, which is strictly
+	// worse. Log it loudly and report success.
+	if err := syncDirFn(dir); err != nil {
+		log.Printf("[freenet] ERROR: %v — %s is queued and will be processed, but may not survive a host power loss", err, j.Ref)
+	}
+	return nil
 }
+
+// syncDirFn is indirected so tests can exercise the durability-failure path.
+var syncDirFn = syncDir
 
 // syncDir flushes a directory's metadata so renames within it are durable.
 func syncDir(dir string) error {

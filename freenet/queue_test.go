@@ -2,6 +2,7 @@ package freenet
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -657,5 +658,110 @@ func TestQueueFailedCountMatchesDisk(t *testing.T) {
 	}
 	if got := q.FailedDepth(); got != onDisk {
 		t.Fatalf("FailedDepth = %d, want %d to match disk", got, onDisk)
+	}
+}
+
+// The rename is what makes a job live; the directory sync only makes it
+// survive a power loss. If the sync fails the job is still queued, so the
+// in-memory index must agree with the filesystem — reporting it as dropped
+// would abandon a job that is sitting right there.
+func TestQueueSyncFailureStillEnqueues(t *testing.T) {
+	q := testQueue(t)
+
+	original := syncDirFn
+	syncDirFn = func(string) error { return errors.New("simulated fsync failure") }
+	defer func() { syncDirFn = original }()
+
+	if err := q.Put(job(refA, 1)); err != nil {
+		t.Fatalf("Put = %v, want success — the file was installed by the rename", err)
+	}
+	if got := q.Depth(); got != 1 {
+		t.Fatalf("Depth = %d, want 1 — a durability warning must not orphan the job", got)
+	}
+	if n := countJSON(t, q.dir); n != 1 {
+		t.Fatalf("%d files in pending, want 1", n)
+	}
+	claimed, err := q.Claim(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil || claimed.Revision != 1 {
+		t.Fatalf("claimed %v, want the job to be processable", claimed)
+	}
+}
+
+// Fail must stay consistent too: a sync failure cannot leave the terminal
+// record uncounted or the inflight copy behind.
+func TestQueueSyncFailureStillRecordsFailure(t *testing.T) {
+	q := testQueue(t)
+	if err := q.Put(job(refA, 1)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := q.Claim(time.Now())
+
+	original := syncDirFn
+	syncDirFn = func(string) error { return errors.New("simulated fsync failure") }
+	defer func() { syncDirFn = original }()
+
+	if err := q.Fail(claimed); err != nil {
+		t.Fatalf("Fail = %v, want success", err)
+	}
+	if got := q.FailedDepth(); got != 1 {
+		t.Fatalf("FailedDepth = %d, want 1", got)
+	}
+	if got := q.InflightDepth(); got != 0 {
+		t.Fatalf("InflightDepth = %d, want 0 — the inflight copy must still be cleared", got)
+	}
+}
+
+// hasTerminalRecord must suppress recovery only for equal-or-newer records.
+func TestQueueRecoversWhenTerminalRecordIsOlder(t *testing.T) {
+	dir := t.TempDir()
+	q1, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An old failure for rev 1 is on record...
+	old := job(refA, 1)
+	if err := q1.write(q1.failedPath(refA), old); err != nil {
+		t.Fatal(err)
+	}
+	// ...while rev 4 was in flight when the hub died.
+	if err := q1.write(q1.inflightPath(refA), job(refA, 4)); err != nil {
+		t.Fatal(err)
+	}
+
+	q2, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q2.Depth(); got != 1 {
+		t.Fatalf("Depth = %d, want 1 — a newer in-flight revision must still be recovered", got)
+	}
+	claimed, _ := q2.Claim(time.Now())
+	if claimed == nil || claimed.Revision != 4 {
+		t.Fatalf("claimed %v, want rev 4", claimed)
+	}
+}
+
+func TestQueueDoesNotRecoverWhenTerminalRecordIsNewer(t *testing.T) {
+	dir := t.TempDir()
+	q1, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q1.write(q1.failedPath(refA), job(refA, 9)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q1.write(q1.inflightPath(refA), job(refA, 4)); err != nil {
+		t.Fatal(err)
+	}
+
+	q2, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q2.Depth(); got != 0 {
+		t.Fatalf("Depth = %d, want 0 — a newer terminal record supersedes the stale inflight copy", got)
 	}
 }
