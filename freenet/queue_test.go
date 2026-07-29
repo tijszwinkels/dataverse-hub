@@ -531,3 +531,131 @@ func TestQueueInflightDepthExposesStrandedJobs(t *testing.T) {
 		t.Fatalf("InflightDepth = %d, want 1", got)
 	}
 }
+
+// A failed claim must leave the job claimable. Dropping the index entry before
+// the rename succeeded would hide a job that is still sitting on disk.
+func TestQueueFailedClaimKeepsJobVisible(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root — directory permissions would not be enforced")
+	}
+	q := testQueue(t)
+	if err := q.Put(job(refA, 1)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Make the rename into inflight/ fail.
+	if err := os.Chmod(q.inflightDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(q.inflightDir, 0o755)
+
+	if _, err := q.Claim(time.Now()); err == nil {
+		t.Fatal("Claim succeeded, want the rename failure surfaced")
+	}
+	if got := q.Depth(); got != 1 {
+		t.Fatalf("Depth = %d, want 1 — a failed claim must not lose track of the job", got)
+	}
+
+	// Once the obstruction clears, the job is claimable again.
+	os.Chmod(q.inflightDir, 0o755)
+	claimed, err := q.Claim(time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed == nil || claimed.Revision != 1 {
+		t.Fatalf("claimed %v, want the job back", claimed)
+	}
+}
+
+// Corruption present at startup must be parked and countable, not invisible.
+func TestQueueParksUnreadablePendingJobsAtStartup(t *testing.T) {
+	dir := t.TempDir()
+	q1, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q1.Put(job(refA, 1)); err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt it, as a torn write or bad disk would.
+	if err := os.WriteFile(q1.pendingPath(refA), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	q2, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q2.Depth(); got != 0 {
+		t.Fatalf("Depth = %d, want 0", got)
+	}
+	if got := q2.FailedDepth(); got != 1 {
+		t.Fatalf("FailedDepth = %d, want 1 — a corrupt job must be parked, not silently ignored", got)
+	}
+	if n := countJSON(t, q2.dir); n != 0 {
+		t.Fatalf("%d files left in pending, want 0", n)
+	}
+}
+
+// Crash between Fail's write and its cleanup: recovery must not resurrect a job
+// that already has a terminal record.
+func TestQueueDoesNotRecoverJobsAlreadyRecordedAsFailed(t *testing.T) {
+	dir := t.TempDir()
+	q1, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q1.Put(job(refA, 3)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := q1.Claim(time.Now())
+	claimed.Attempts = 4
+	claimed.LastError = "gave up"
+
+	// Write the terminal record but leave the inflight copy behind, exactly as
+	// a crash between the two steps would.
+	if err := q1.write(q1.failedPath(refA), claimed); err != nil {
+		t.Fatal(err)
+	}
+
+	q2, err := newQueue(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q2.Depth(); got != 0 {
+		t.Fatalf("Depth = %d, want 0 — an exhausted job must not be republished past its budget", got)
+	}
+	if got := q2.InflightDepth(); got != 0 {
+		t.Fatalf("InflightDepth = %d, want 0 — the stale inflight copy should be cleared", got)
+	}
+	if got := q2.FailedDepth(); got != 1 {
+		t.Fatalf("FailedDepth = %d, want 1", got)
+	}
+}
+
+// failed_queued must match what is actually on disk: two failures of the same
+// ref overwrite one file.
+func TestQueueFailedCountMatchesDisk(t *testing.T) {
+	q := testQueue(t)
+
+	for _, rev := range []int{1, 2} {
+		if err := q.Put(job(refA, rev)); err != nil {
+			t.Fatal(err)
+		}
+		claimed, err := q.Claim(time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Fail(claimed); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	onDisk := countJobFiles(q.failedDir)
+	if onDisk != 1 {
+		t.Fatalf("%d files in failed/, want 1 (same ref overwrites)", onDisk)
+	}
+	if got := q.FailedDepth(); got != onDisk {
+		t.Fatalf("FailedDepth = %d, want %d to match disk", got, onDisk)
+	}
+}

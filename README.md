@@ -425,10 +425,12 @@ a fresh pending file instead of being swallowed when the in-flight job finishes.
 Anything stranded in `inflight/` by an unclean shutdown is returned to pending
 on the next start.
 
-Enqueueing happens inline on the write path — it is one small temp-file+rename,
-the same cost the object store itself already pays — which is what makes
+Enqueueing happens inline on the write path — one small temp-file+rename+fsync,
+the same shape the object store itself already uses — which is what makes
 "pending mirrors survive a restart" true. The **publish** is fully asynchronous:
 a slow, hanging or failing publisher can never delay or fail a client's write.
+A backlog cannot become write latency either: the queue keeps an in-memory index
+of pending jobs, so every locked operation touches at most one file.
 
 Failures retry with exponential backoff (30 s doubling, capped at 10 min); the
 delay is stored in the job file so it survives a restart rather than every

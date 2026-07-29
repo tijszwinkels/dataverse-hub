@@ -135,20 +135,22 @@ func (q *queue) Claim(now time.Time) (*Job, error) {
 		if !ok {
 			return nil, nil
 		}
-		delete(q.pending, ref)
-
+		// Rename first: dropping the index entry before the rename succeeded
+		// would hide a job that is still sitting in the pending directory.
 		if err := os.Rename(q.pendingPath(ref), q.inflightPath(ref)); err != nil {
 			return nil, fmt.Errorf("freenet queue claim %s: %w", ref, err)
 		}
+		delete(q.pending, ref)
 		j, err := q.read(q.inflightPath(ref))
 		if err != nil {
 			// The file vanished or was corrupted underneath us. Park it rather
 			// than wedging the queue, and move on to the next candidate.
 			log.Printf("[freenet] ERROR: unreadable job %s, parking in failed/: %v", ref, err)
-			if renameErr := os.Rename(q.inflightPath(ref), q.failedPath(ref)); renameErr == nil {
-				q.failedCount++
-			} else {
+			isNew := !fileExists(q.failedPath(ref))
+			if renameErr := os.Rename(q.inflightPath(ref), q.failedPath(ref)); renameErr != nil {
 				log.Printf("[freenet] ERROR: could not park %s: %v", ref, renameErr)
+			} else if isNew {
+				q.failedCount++
 			}
 			continue
 		}
@@ -211,10 +213,15 @@ func (q *queue) Fail(j *Job) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	// failedCount tracks files, not events: a second failure of the same ref
+	// overwrites one file and must not double-count.
+	isNew := !fileExists(q.failedPath(j.Ref))
 	if err := q.write(q.failedPath(j.Ref), j); err != nil {
 		return err
 	}
-	q.failedCount++
+	if isNew {
+		q.failedCount++
+	}
 	return q.done(j)
 }
 
@@ -279,7 +286,11 @@ func (q *queue) loadPending() error {
 		path := filepath.Join(q.dir, e.Name())
 		j, err := q.read(path)
 		if err != nil {
-			log.Printf("[freenet] WARN: ignoring unreadable queue file %s: %v", path, err)
+			// Corruption that predates this process would otherwise be
+			// invisible forever: not indexed, so never claimed, never counted.
+			// Park it where an operator will find it.
+			log.Printf("[freenet] ERROR: unreadable queue file %s, parking in failed/: %v", path, err)
+			q.park(path, e.Name())
 			continue
 		}
 		q.pending[j.Ref] = pendingEntry{
@@ -315,6 +326,16 @@ func (q *queue) recoverInflight() {
 			stranded++
 			continue
 		}
+		// A terminal record for this revision means we crashed between Fail's
+		// write and its cleanup. Requeueing would publish a job past its retry
+		// budget while it is simultaneously recorded as failed.
+		if q.hasTerminalRecord(j) {
+			log.Printf("[freenet] %s rev %d is already recorded as failed, discarding the stale inflight copy", j.Ref, j.Revision)
+			if err := os.Remove(path); err != nil {
+				log.Printf("[freenet] WARN: could not remove stale inflight copy %s: %v", path, err)
+			}
+			continue
+		}
 		// put drops it if a newer revision is already pending; either way the
 		// inflight copy goes away.
 		if err := q.put(j); err != nil {
@@ -331,6 +352,31 @@ func (q *queue) recoverInflight() {
 		log.Printf("[freenet] ERROR: %d job(s) stranded in %s and could not be recovered — they will NOT be published until this is resolved",
 			stranded, q.inflightDir)
 	}
+}
+
+// park moves an unreadable queue file into failed/ so it stays countable.
+func (q *queue) park(path, name string) {
+	dst := filepath.Join(q.failedDir, name)
+	isNew := !fileExists(dst)
+	if err := os.Rename(path, dst); err != nil {
+		log.Printf("[freenet] ERROR: could not park %s: %v", path, err)
+		return
+	}
+	if isNew {
+		q.failedCount++
+	}
+}
+
+// hasTerminalRecord reports whether failed/ already holds this revision (or a
+// newer one) for the job's ref.
+func (q *queue) hasTerminalRecord(j *Job) bool {
+	recorded, err := q.read(q.failedPath(j.Ref))
+	return err == nil && recorded.Revision >= j.Revision
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func (q *queue) pendingPath(ref string) string  { return filepath.Join(q.dir, ref+".json") }
@@ -381,6 +427,22 @@ func (q *queue) write(path string, j *Job) error {
 	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("freenet queue rename: %w", err)
+	}
+	// Syncing the file is not enough: the rename that publishes it is a
+	// directory operation, and without this a host power-loss can lose the
+	// directory entry even though Put returned success (fsync(2)).
+	return syncDir(dir)
+}
+
+// syncDir flushes a directory's metadata so renames within it are durable.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("freenet queue open dir %s: %w", dir, err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		return fmt.Errorf("freenet queue sync dir %s: %w", dir, err)
 	}
 	return nil
 }
