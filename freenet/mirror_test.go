@@ -53,6 +53,14 @@ func testMirror(t *testing.T, retries int) (*Mirror, func() []string) {
 	}
 }
 
+// record appends an event directly. Test-only: production code reaches
+// appendEvent through succeed/retry/fail/drop.
+func (m *Mirror) record(e Event) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.appendEvent(e)
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

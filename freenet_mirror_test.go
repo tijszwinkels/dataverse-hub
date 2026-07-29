@@ -281,6 +281,12 @@ func TestFreenetStatusReportsJobs(t *testing.T) {
 		body, _ := io.ReadAll(statusResp.Body)
 		t.Fatalf("GET /freenet/status = %d, want 200: %s", statusResp.StatusCode, body)
 	}
+	// Set by the router's jsonContentType middleware, like every other
+	// endpoint — asserted here so removing that middleware is a test failure
+	// rather than a silently untyped response.
+	if ct := statusResp.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
 
 	var st freenet.Status
 	if err := json.NewDecoder(statusResp.Body).Decode(&st); err != nil {

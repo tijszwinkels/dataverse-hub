@@ -47,7 +47,7 @@ type Options struct {
 type Event struct {
 	Ref        string    `json:"ref"`
 	Revision   int       `json:"revision"`
-	Status     string    `json:"status"` // "succeeded", "retrying", or "failed"
+	Status     string    `json:"status"` // "succeeded", "retrying", "failed", or "dropped"
 	Attempts   int       `json:"attempts"`
 	DurationMS int64     `json:"duration_ms"`
 	At         time.Time `json:"at"`
@@ -419,13 +419,6 @@ func (m *Mirror) drop(j *Job, err error) {
 	if len(m.droppedRefs) > maxRecentEvents {
 		m.droppedRefs = m.droppedRefs[:maxRecentEvents]
 	}
-}
-
-// record appends an event. Callers hold no lock.
-func (m *Mirror) record(e Event) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.appendEvent(e)
 }
 
 // appendEvent prepends to the newest-first ring. Caller must hold m.mu.
