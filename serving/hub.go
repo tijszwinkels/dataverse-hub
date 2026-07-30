@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/tijszwinkels/dataverse-hub/auth"
+	"github.com/tijszwinkels/dataverse-hub/freenet"
 	"github.com/tijszwinkels/dataverse-hub/realm"
 	"github.com/tijszwinkels/dataverse-hub/storage"
 	"github.com/tijszwinkels/dataverse-hub/vhost"
@@ -23,7 +24,8 @@ type Hub struct {
 	shared           *realm.SharedRealms
 	Vhost            *vhost.Resolver // nil = vhosting disabled
 	VhostMode        string
-	writeLocks       *keyedMutex // per-ref serialization of PUT read-check-write
+	Mirror           *freenet.Mirror // nil = Freenet mirroring disabled
+	writeLocks       *keyedMutex     // per-ref serialization of PUT read-check-write
 }
 
 // NewHub creates a Hub with the given components.
@@ -61,6 +63,13 @@ func (h *Hub) Router() http.Handler {
 	r.Get("/auth/realms", handleAuthRealms(h.index.Resolver()))
 
 	r.Get("/ask", TLSAskHandler(h.Vhost))
+	// Registered only when the mirror is enabled, so a hub without a
+	// [freenet] section has exactly the routing table it had before.
+	if h.Mirror != nil {
+		r.Get("/freenet/status", func(w http.ResponseWriter, r *http.Request) {
+			handleFreenetStatus(w, r, h.Mirror)
+		})
+	}
 	r.Get("/", h.handleRoot)
 	// Root representation aliases: the representation of whatever GET / resolves
 	// to on this host, served directly (see resolveRootTarget). Static routes,

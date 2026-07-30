@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestApplyFile(t *testing.T) {
@@ -195,5 +196,142 @@ func TestUpstreamPushInvalidFallsBackToPublic(t *testing.T) {
 
 	if cfg.UpstreamPush != "public" {
 		t.Errorf("UpstreamPush = %q, want %q (fallback from invalid)", cfg.UpstreamPush, "public")
+	}
+}
+
+func TestFreenetConfigFromFile(t *testing.T) {
+	tomlContent := `
+store_dir = "/data/dv"
+
+[freenet]
+enabled = true
+publish_cmd = "/opt/freenet/publish-v2.sh"
+queue_dir = "/var/lib/dv/freenet"
+timeout = "20m"
+retries = 5
+`
+	path := filepath.Join(t.TempDir(), "hub.toml")
+	if err := os.WriteFile(path, []byte(tomlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	if err := applyFile(&cfg, path); err != nil {
+		t.Fatalf("applyFile: %v", err)
+	}
+
+	if !cfg.Freenet.Enabled {
+		t.Error("Freenet.Enabled = false, want true")
+	}
+	if cfg.Freenet.PublishCmd != "/opt/freenet/publish-v2.sh" {
+		t.Errorf("Freenet.PublishCmd = %q", cfg.Freenet.PublishCmd)
+	}
+	if cfg.Freenet.QueueDir != "/var/lib/dv/freenet" {
+		t.Errorf("Freenet.QueueDir = %q", cfg.Freenet.QueueDir)
+	}
+	if cfg.Freenet.Timeout != 20*time.Minute {
+		t.Errorf("Freenet.Timeout = %v, want 20m", cfg.Freenet.Timeout)
+	}
+	if cfg.Freenet.Retries != 5 {
+		t.Errorf("Freenet.Retries = %d, want 5", cfg.Freenet.Retries)
+	}
+}
+
+// The whole feature must be inert unless it is explicitly switched on.
+func TestFreenetDisabledByDefault(t *testing.T) {
+	cfg := defaultConfig()
+	if cfg.Freenet.Enabled {
+		t.Error("Freenet.Enabled = true by default, want false")
+	}
+	if cfg.Freenet.PublishCmd != "" {
+		t.Errorf("Freenet.PublishCmd = %q by default, want empty", cfg.Freenet.PublishCmd)
+	}
+	if cfg.Freenet.Timeout != 15*time.Minute {
+		t.Errorf("Freenet.Timeout = %v, want the 15m default", cfg.Freenet.Timeout)
+	}
+	if cfg.Freenet.Retries != 3 {
+		t.Errorf("Freenet.Retries = %d, want the default 3", cfg.Freenet.Retries)
+	}
+}
+
+// A config file with no [freenet] section must leave the defaults alone.
+func TestFreenetAbsentSectionKeepsDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub.toml")
+	if err := os.WriteFile(path, []byte("mode = \"root\"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultConfig()
+	if err := applyFile(&cfg, path); err != nil {
+		t.Fatalf("applyFile: %v", err)
+	}
+	if cfg.Freenet.Enabled {
+		t.Error("Freenet.Enabled = true with no [freenet] section, want false")
+	}
+	if cfg.Freenet.Retries != 3 || cfg.Freenet.Timeout != 15*time.Minute {
+		t.Errorf("Freenet defaults disturbed: %+v", cfg.Freenet)
+	}
+}
+
+func TestFreenetConfigFromEnv(t *testing.T) {
+	cfg := defaultConfig()
+
+	t.Setenv("HUB_FREENET_ENABLED", "true")
+	t.Setenv("HUB_FREENET_PUBLISH_CMD", "/srv/publish-v2.sh")
+	t.Setenv("HUB_FREENET_QUEUE_DIR", "/srv/queue")
+	t.Setenv("HUB_FREENET_TIMEOUT", "90s")
+	t.Setenv("HUB_FREENET_RETRIES", "1")
+	applyEnv(&cfg)
+
+	if !cfg.Freenet.Enabled {
+		t.Error("Freenet.Enabled = false, want true (env)")
+	}
+	if cfg.Freenet.PublishCmd != "/srv/publish-v2.sh" {
+		t.Errorf("Freenet.PublishCmd = %q", cfg.Freenet.PublishCmd)
+	}
+	if cfg.Freenet.QueueDir != "/srv/queue" {
+		t.Errorf("Freenet.QueueDir = %q", cfg.Freenet.QueueDir)
+	}
+	if cfg.Freenet.Timeout != 90*time.Second {
+		t.Errorf("Freenet.Timeout = %v, want 90s", cfg.Freenet.Timeout)
+	}
+	if cfg.Freenet.Retries != 1 {
+		t.Errorf("Freenet.Retries = %d, want 1", cfg.Freenet.Retries)
+	}
+}
+
+func TestFreenetInvalidEnvKeepsPrevious(t *testing.T) {
+	cfg := defaultConfig()
+	t.Setenv("HUB_FREENET_TIMEOUT", "not-a-duration")
+	t.Setenv("HUB_FREENET_RETRIES", "lots")
+	applyEnv(&cfg)
+
+	if cfg.Freenet.Timeout != 15*time.Minute {
+		t.Errorf("Freenet.Timeout = %v, want the default kept after invalid env", cfg.Freenet.Timeout)
+	}
+	if cfg.Freenet.Retries != 3 {
+		t.Errorf("Freenet.Retries = %d, want the default kept after invalid env", cfg.Freenet.Retries)
+	}
+}
+
+func TestFreenetQueueDirDefaultsUnderStoreDir(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.StoreDir = "/data/dv"
+	resolveFreenetDefaults(&cfg)
+
+	want := filepath.Join("/data/dv", "freenet-queue")
+	if cfg.Freenet.QueueDir != want {
+		t.Errorf("Freenet.QueueDir = %q, want %q", cfg.Freenet.QueueDir, want)
+	}
+}
+
+func TestFreenetExplicitQueueDirWins(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.StoreDir = "/data/dv"
+	cfg.Freenet.QueueDir = "/elsewhere/queue"
+	resolveFreenetDefaults(&cfg)
+
+	if cfg.Freenet.QueueDir != "/elsewhere/queue" {
+		t.Errorf("Freenet.QueueDir = %q, want the explicit value", cfg.Freenet.QueueDir)
 	}
 }

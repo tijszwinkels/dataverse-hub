@@ -69,6 +69,7 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 | `vhost_mode` | `"isolate"` | Host routing mode: `"off"`, `"redirect"`, or `"isolate"` |
 | `txt_cache_ttl` | `"5m"` | DNS TXT record cache TTL for custom domain resolution |
 | `[realms."name"]` | *(none)* | Shared realm config — see [Shared realms](#shared-realms) below |
+| `[freenet]` | *(disabled)* | Freenet write-through mirror — see [Freenet mirror](#freenet-mirror) below |
 
 ### Environment variables
 
@@ -89,6 +90,11 @@ Env vars override any value from the config file:
 | `HUB_BASE_DOMAIN` | `base_domain` |
 | `HUB_VHOST_MODE` | `vhost_mode` |
 | `HUB_TXT_CACHE_TTL` | `txt_cache_ttl` |
+| `HUB_FREENET_ENABLED` | `freenet.enabled` |
+| `HUB_FREENET_PUBLISH_CMD` | `freenet.publish_cmd` |
+| `HUB_FREENET_QUEUE_DIR` | `freenet.queue_dir` |
+| `HUB_FREENET_TIMEOUT` | `freenet.timeout` |
+| `HUB_FREENET_RETRIES` | `freenet.retries` |
 
 ## API
 
@@ -273,13 +279,16 @@ Use this for data that should be publicly accessible on your hub but not spread 
 
 ### Realm access and propagation summary
 
-| Realm | Auth to read | `upstream_push=public` | `upstream_push=all` |
-|-------|-------------|----------------------|-------------------|
-| `dataverse001` | No | Pushed upstream | Pushed upstream |
-| `server-public` | No | **Stays local** | Pushed upstream |
-| Shared realm | Members only | Stays local | Pushed upstream |
-| Identity realm (pubkey) | Owner only | Stays local | Pushed upstream |
-| `local` (ig CLI only) | N/A | Never pushed | Never pushed |
+| Realm | Auth to read | `upstream_push=public` | `upstream_push=all` | [Freenet mirror](#freenet-mirror) |
+|-------|-------------|----------------------|-------------------|---|
+| `dataverse001` | No | Pushed upstream | Pushed upstream | **Mirrored** |
+| `server-public` | No | **Stays local** | Pushed upstream | Never |
+| Shared realm | Members only | Stays local | Pushed upstream | Never |
+| Identity realm (pubkey) | Owner only | Stays local | Pushed upstream | Never |
+| `local` (ig CLI only) | N/A | Never pushed | Never pushed | Never |
+
+The Freenet column is deliberately *not* tied to `upstream_push`: even with
+`upstream_push = "all"`, only `dataverse001` objects are ever mirrored.
 
 ### Content negotiation
 
@@ -316,6 +325,179 @@ GET /ask?domain={hostname}    # returns 200/403 for Caddy on-demand TLS decision
 ```
 
 Approves certificates for hash subdomains (`{hash}.{base_domain}`) and custom domains with a valid `_dv.{domain}` TXT record pointing to a PAGE ref. This works in both `redirect` and `isolate` mode.
+
+## Freenet mirror
+
+Optional, **off by default**. When enabled, every public `dataverse001` object
+the hub accepts is asynchronously republished to [Freenet](https://freenet.org)
+by an external publish command.
+
+This is a **write-through mirror only — there is no read fallback.** Nothing in
+this subsystem is ever consulted to serve a request: a Freenet not-found can
+stall for minutes, which is fine for a background republish and unacceptable on
+a serving path.
+
+```toml
+[freenet]
+enabled = true
+publish_cmd = "/opt/freenet/scripts/publish-v2.sh"
+queue_dir = "./dataverse001/freenet-queue"   # default: <store_dir>/freenet-queue
+timeout = "15m"
+retries = 3
+```
+
+| Key | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Turn the mirror on |
+| `publish_cmd` | *(none)* | Absolute path to the publish command |
+| `queue_dir` | `<store_dir>/freenet-queue` | Where pending/in-flight/failed jobs live |
+| `timeout` | `"15m"` | Wall-clock budget for one publish |
+| `retries` | `3` | Retry attempts *after* the initial one, so `3` means up to **4** publish attempts |
+
+With `enabled = false` (or no `[freenet]` section at all) the hub behaves
+exactly as it does without this feature: nothing is queued, no command is ever
+run, and the write path is unchanged.
+
+### What gets mirrored
+
+Only objects whose `in` contains `dataverse001` — the same predicate that
+decides what gets pushed upstream. Identity-realm, shared-realm and
+`server-public` objects are **never** handed to the publisher, regardless of
+`upstream_push`. See the [realm summary](#realm-access-and-propagation-summary).
+
+> **Publishing is irreversible.** A Freenet snapshot is public and permanent:
+> every mirrored revision stays retrievable forever, and there is no unpublish.
+> Enable this only on a hub whose public realm you are content to publish in
+> full.
+
+### The publish command
+
+`publish_cmd` is invoked as:
+
+```
+publish_cmd /path/to/envelope.json
+```
+
+with one argument: a temp file holding the signed envelope. It is expected to be
+idempotent and to exit 0 only on full success. In production this is
+`publish-v2.sh` from the [dataverse-freenet](https://github.com/tijszwinkels/dataverse-freenet)
+repo, which performs the ordered publish flow:
+
+1. `PUT` the revision snapshot
+2. confirm the snapshot `GET`s back — a poke issued before the snapshot is
+   confirmed stalls for the host's ~240 s fetch budget and then fails
+3. `PUT`/update the head
+4. poke the inbound index of every distinct target in `item.relations.*[].ref`
+
+Pokes are independent: a partial failure exits non-zero with a per-target
+report, and because every step is idempotent (snapshot re-`PUT` no-ops, head and
+pokes are last-write-wins) a retry simply converges.
+
+The command is executed **directly, never through a shell** — a single absolute
+path with no word splitting — and the envelope is passed as a *file* rather than
+interpolated into a command line, so nothing in a signed object can influence
+how the command is parsed. It inherits the hub's environment (it needs `PATH`,
+`HOME` and its own Freenet node config). On timeout its entire process group is
+killed, not just the direct child, so a script that shells out to `node`/`fdev`
+does not leave those children running.
+
+If `enabled = true` but `publish_cmd` is missing, non-executable or not an
+absolute path, **the hub refuses to start** rather than run a mirror that
+silently fails every job.
+
+### Queue and durability
+
+Jobs live on disk under `queue_dir`, so a restart does not lose pending
+mirrors:
+
+```
+<queue_dir>/<ref>.json           pending — waiting to be published
+<queue_dir>/inflight/<ref>.json  claimed by the worker, publish in progress
+<queue_dir>/failed/<ref>.json    gave up after the retry budget
+<queue_dir>/tmp/                 envelopes staged for the publish command
+```
+
+Naming the pending file after the ref gives **dedupe and supersede** for free: a
+burst of writes to one object collapses into a single publish of the newest
+revision, and a queued job is only ever replaced by a strictly newer one. A
+claim is a rename into `inflight/`, so a revision arriving mid-publish lands in
+a fresh pending file instead of being swallowed when the in-flight job finishes.
+Anything stranded in `inflight/` by an unclean shutdown is returned to pending
+on the next start.
+
+Enqueueing happens inline on the write path — one small temp-file+rename+fsync,
+the same shape the object store itself already uses — which is what makes
+"pending mirrors survive a restart" true. The **publish** is fully asynchronous:
+a slow, hanging or failing publisher can never delay or fail a client's write.
+A backlog cannot become write latency either: the queue keeps an in-memory index
+of pending jobs, so every locked operation touches at most one file.
+
+Failures retry with exponential backoff (30 s doubling, capped at 10 min); the
+delay is stored in the job file so it survives a restart rather than every
+pending job stampeding the publisher at boot. After the budget is spent the job
+moves to `failed/` with its error, where it stays visible instead of being
+silently dropped.
+
+On shutdown, a running publish is cancelled (process group killed) and its job
+returned to the queue with its attempt count untouched — a restart cannot burn
+through a job's retry budget.
+
+### Status
+
+```
+GET /freenet/status        (authentication required; 404 when the mirror is disabled)
+```
+
+```json
+{
+  "enabled": true,
+  "queue_depth": 0,
+  "in_flight": 0,
+  "inflight_queued": 0,
+  "succeeded": 12,
+  "failed": 1,
+  "failed_queued": 1,
+  "dropped": 0,
+  "last_error": "publish command exited 1",
+  "dropped_refs": [],
+  "recent": [
+    {"ref": "<pubkey>.<uuid>", "revision": 3, "status": "succeeded",
+     "attempts": 1, "duration_ms": 48213, "at": "2026-07-28T12:00:00Z"}
+  ]
+}
+```
+
+- `failed` counts give-ups by *this* process; `failed_queued` counts the job
+  files still sitting in `failed/`, so a failure does not disappear when the hub
+  is restarted.
+- `inflight_queued` counts job files under `inflight/`. It is 1 during a
+  publish. If it stays above `in_flight`, a job was stranded there and needs an
+  operator.
+- `dropped` / `dropped_refs` count objects that could not be enqueued at all (a
+  full or read-only `queue_dir`). The client's write succeeded and there is no
+  queue file to find, so this is the only place such a loss is visible — **alarm
+  on it.** `dropped_refs` is kept separate from `recent` so ordinary job traffic
+  cannot evict it, but it is still in-memory only: when the queue filesystem is
+  unwritable there is by definition nowhere durable to record the loss, so the
+  hub log (`ERROR: enqueue <ref> rev N failed, mirror DROPPED`) is the record
+  that survives a restart.
+- `last_error` is a sanitized category — `publish timed out`, `publish command
+  exited 3`, `enqueue failed`. It never contains a filesystem path or the
+  publisher's output; see the authorization note below.
+
+The route is registered only when the mirror is enabled; a hub with
+`enabled = false` returns 404, exactly as it did before this feature existed.
+
+Authentication is required, matching `GET /auth/realms`. Note what that gate is:
+the hub has no operator/admin concept, so anyone can generate a keypair and
+complete the public challenge flow. "Authenticated" means "not an anonymous
+scanner", not "trusted". The payload is scoped to match — refs (public objects
+by construction), counters and timings. The publisher's **raw output is
+deliberately excluded**, since it can carry filesystem paths and node details;
+it goes to the hub log and the `failed/` job file, both of which need
+filesystem access to read.
+
+Every job transition is also logged with a `[freenet]` prefix.
 
 ## Virtual hosting
 
