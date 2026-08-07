@@ -68,7 +68,7 @@ See [`hub.example.toml`](hub.example.toml) for all options with comments.
 | `base_domain` | `"localhost"` | Base domain for virtual hosting; required for `vhost_mode = "redirect"` or `"isolate"` |
 | `vhost_mode` | `"isolate"` | Host routing mode: `"off"`, `"redirect"`, or `"isolate"` |
 | `txt_cache_ttl` | `"5m"` | DNS TXT record cache TTL for custom domain resolution |
-| `[realms."name"]` | *(none)* | Shared realm config — see [Shared realms](#shared-realms) below |
+| `[realms."name"]` | *(none)* | Shared realm TOML override — see [Shared realms](#shared-realms) below |
 
 ### Environment variables
 
@@ -231,7 +231,53 @@ Shared realms let a group of pubkeys share private access to objects. They sit b
 - **Shared realm** — only authenticated members can read
 - **Identity-realm** — only the owner can read
 
-Configure shared realms in `hub.toml`:
+Membership is declared **in the graph** by signed `SHARED_REALM` objects. Any hub that encounters the realm definition can resolve access without operator config. A hub operator can additionally grant members via `hub.toml` as an **additive local override**.
+
+#### Defining a shared realm (graph-native)
+
+A `SHARED_REALM` object names a realm and lists its members. The realm's canonical object lives at a **deterministic, computable address** — its `id` is the UUIDv5 hash of the realm name (namespace `00000000-0000-0000-0000-000000000000`) — so any hub can find the access list without a lookup table.
+
+```json
+{
+  "is": "instructionGraph001",
+  "signature": "<base64 ECDSA over item>",
+  "item": {
+    "in": ["dataverse001", "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ"],
+    "ref": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.6bb7d6cc-1556-5a76-a910-edc802d4a2b7",
+    "id": "6bb7d6cc-1556-5a76-a910-edc802d4a2b7",
+    "pubkey": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ",
+    "created_at": "2026-06-30T12:00:00Z",
+    "revision": 1,
+    "type": "SHARED_REALM",
+    "name": "Acme Team",
+    "instruction": "A shared realm. Listed members have read access to objects carrying this realm name in item.in.",
+    "content": { "realm": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.AcmeTeam" },
+    "relations": {
+      "member": [
+        { "ref": "AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.346bef5e-94ff-4f7a-bcf6-d78ae1e1541c" },
+        { "ref": "BzxY7_other_pubkey_here.00000000-0000-0000-0000-000000000001" }
+      ]
+    }
+  }
+}
+```
+
+**Type contract (enforced by the hub on PUT):**
+
+- `item.type` must be `"SHARED_REALM"`.
+- `content.realm` names the realm. It **must be owner-prefixed**: the portion before the first `.` must be the signer's compressed pubkey (e.g. `{owner-pubkey}.{Name}`). The owner of a pubkey namespace owns the realms under it.
+- The signer (`item.pubkey`) must equal the realm's owner prefix.
+- `item.id` must equal `uuid_v5("00000000-0000-0000-0000-000000000000", content.realm)` — the deterministic hash. Compute it in any language with a standard UUIDv5: Python `uuid.uuid5(uuid.UUID("00000000-0000-0000-0000-000000000000"), realm)`, JS `uuid.v5(realm, NIL_UUID)`, etc.
+- `item.in` **must include `"dataverse001"`** so the realm definition propagates globally and is discoverable by every hub.
+- `relations.member` lists member refs; the **pubkey portion** (before the first `.`) of each ref is granted access. Invalid refs are skipped; duplicates are deduped. The owner is not implicitly a member — list them explicitly if they should have access.
+
+**Updating / revoking:** edit `relations.member` and PUT a higher `revision` to the same canonical ref. Removing a pubkey revokes their access. Higher revision wins on sync.
+
+**Resolving access:** given a realm `R`, a hub computes `owner = R.split(".")[0]`, `id = uuid_v5(NS, R)`, fetches `{owner}.{id}`, verifies the signature, and reads the members. No scanning or election — the address is unique by construction (a second object from the same owner collides on the composite key and is treated as an update; a different signer is rejected by the prefix rule).
+
+#### TOML override (additive, local)
+
+A hub operator can grant additional members via `hub.toml`. This is **additive**: TOML can add members the graph doesn't list, but it **cannot revoke** a graph-granted member (revocation is done in the graph via a higher revision). Use it for emergency/local grants.
 
 ```toml
 [realms."AxyU5_5vWmP2tO_klN4UpbZzRsuJEvJTrdwdg_gODxZJ.MyTeam"]
@@ -241,21 +287,19 @@ members = [
 ]
 ```
 
-Realm names follow the convention `{owner-pubkey}.{Name}` to show who created the realm, but any string works.
+**Hot reload:** Edit `hub.toml` and send `SIGHUP` to the hub process — the TOML override reloads without restart (graph membership is always live, ingested from `SHARED_REALM` objects as they're PUT). On parse error, the previous config is kept.
 
 **Behavior:**
 
-- Objects with a shared realm in `item.in` are only readable by authenticated members.
+- Objects with a shared realm in `item.in` are only readable by authenticated members (from the graph or TOML).
 - Unauthenticated requests return `404` (same as identity-realms).
 - Any signed object can be PUT into a shared realm — the `members_only` search filter (default: `true`) controls whether non-member contributions appear in list results.
 - Objects can belong to both a shared realm and `dataverse001` — the public realm takes precedence for read access.
 
-**Hot reload:** Edit `hub.toml` and send `SIGHUP` to the hub process — realm config reloads without restart. On parse error, the previous config is kept.
-
 **API:**
 
 ```
-GET /auth/realms    # list shared realms the authenticated user belongs to (401 if unauthenticated)
+GET /auth/realms    # list shared realms the authenticated user belongs to (graph + TOML) (401 if unauthenticated)
 ```
 
 Query parameter for search/inbound endpoints:
