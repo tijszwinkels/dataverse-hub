@@ -5,12 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"sync"
-	"sync/atomic"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,7 +162,7 @@ func TestProxyGetCachesLocally(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestProxyETagEnrichment(t *testing.T) {
+func TestProxyDoesNotValidateIndependentCopiesByRevisionOnly(t *testing.T) {
 	proxySrv, rootSrv, cleanup := testRootAndProxy(t)
 	defer cleanup()
 
@@ -185,12 +185,12 @@ func TestProxyETagEnrichment(t *testing.T) {
 		origHandler.ServeHTTP(w, r)
 	})
 
-	// GET through proxy without client ETag — proxy should inject one
+	// A matching revision alone cannot rule out a concurrent offline edit.
 	resp = doGet(t, proxySrv, "/"+ref)
 	resp.Body.Close()
 
-	if receivedETag == "" {
-		t.Error("proxy should have injected If-None-Match to upstream")
+	if receivedETag != "" {
+		t.Error("proxy must compare upstream content instead of injecting a revision-only ETag")
 	}
 }
 
