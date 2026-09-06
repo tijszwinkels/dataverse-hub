@@ -26,6 +26,7 @@ type SyncPending struct {
 
 	stop chan struct{}
 	wg   sync.WaitGroup
+	mu   sync.Mutex // protects queue replacement against acknowledgements
 }
 
 // NewSyncPending creates a sync pending manager. Creates the directory if needed.
@@ -42,6 +43,8 @@ func NewSyncPending(dir string, upstream *Client, store *storage.Store, index *s
 
 // Add writes an object file to the sync_pending directory (atomic write).
 func (sp *SyncPending) Add(ref string, data []byte) error {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
 	target := filepath.Join(sp.dir, ref+".json")
 
 	tmp, err := os.CreateTemp(sp.dir, ".tmp-*")
@@ -70,19 +73,42 @@ func (sp *SyncPending) Add(ref string, data []byte) error {
 
 // Remove deletes a pending object file.
 func (sp *SyncPending) Remove(ref string) error {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
 	return os.Remove(filepath.Join(sp.dir, ref+".json"))
 }
 
-// reject moves a pending object to sync_rejected/ so it doesn't block the queue.
-func (sp *SyncPending) reject(ref string) {
-	rejDir := filepath.Join(filepath.Dir(sp.dir), "sync_rejected")
-	os.MkdirAll(rejDir, 0755)
-	src := filepath.Join(sp.dir, ref+".json")
-	dst := filepath.Join(rejDir, ref+".json")
-	if err := os.Rename(src, dst); err != nil {
-		log.Printf("[proxy] WARN: sync rejected move %s: %v", ref, err)
-		os.Remove(src) // at least unblock the queue
+// acknowledge removes only the version actually sent, never a newer queued edit.
+func (sp *SyncPending) acknowledge(ref string, sent []byte) bool {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+	path := filepath.Join(sp.dir, ref+".json")
+	current, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return true
 	}
+	if err != nil {
+		log.Printf("[proxy] ERROR: sync acknowledge %s: %v", ref, err)
+		return false
+	}
+	if !bytes.Equal(current, sent) {
+		return true
+	}
+	if err := os.Remove(path); err != nil {
+		log.Printf("[proxy] ERROR: sync acknowledge remove %s: %v", ref, err)
+		return false
+	}
+	return true
+}
+
+func (sp *SyncPending) preserve(ref string, data []byte, folder string) bool {
+	path, err := storage.PreserveConflict(filepath.Join(filepath.Dir(sp.dir), folder), data)
+	if err != nil {
+		log.Printf("[proxy] ERROR: preserve rejected edit %s: %v; keeping retry pending", ref, err)
+		return false
+	}
+	log.Printf("[proxy] WARN: rejected edit %s preserved at %s; resolve explicitly with a higher revision", ref, path)
+	return sp.acknowledge(ref, data)
 }
 
 // List returns all refs in the sync_pending directory.
@@ -208,22 +234,31 @@ func (sp *SyncPending) pushOne(ref string) bool {
 	switch {
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated:
 		log.Printf("[proxy] sync: pushed %s (pending: %d remaining)", ref, remaining)
-		sp.Remove(ref)
-		return true
+		return sp.acknowledge(ref, data)
 
 	case resp.StatusCode == http.StatusConflict:
-		// Upstream has newer revision — fetch it and cache locally
-		log.Printf("[proxy] sync: %s conflict (upstream has newer), fetching", ref)
-		sp.Remove(ref)
-		sp.fetchAndCache(ref)
-		return true
+		// 409 can mean an identical replay, a concurrent edit, or a newer
+		// upstream revision. None permits silently replacing the local edit.
+		remote, err := sp.fetchObject(ref)
+		if err != nil {
+			log.Printf("[proxy] WARN: sync conflict fetch %s: %v; keeping retry pending", ref, err)
+			return false
+		}
+		same, err := object.SameItem(data, remote)
+		if err != nil {
+			log.Printf("[proxy] ERROR: compare sync conflict %s: %v", ref, err)
+			return false
+		}
+		if same {
+			return sp.acknowledge(ref, data)
+		}
+		return sp.preserve(ref, data, "sync_conflicts")
 
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// Permanent client error — our data is bad, won't succeed on retry
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("[proxy] WARN: sync pending push %s rejected (%d): %s", ref, resp.StatusCode, body)
-		sp.reject(ref)
-		return true // continue with next object
+		return sp.preserve(ref, data, "sync_rejected")
 
 	default:
 		// Server error (5xx) — upstream is struggling, stop and retry later
@@ -233,48 +268,41 @@ func (sp *SyncPending) pushOne(ref string) bool {
 	}
 }
 
-// fetchAndCache fetches an object from upstream and caches it locally.
-func (sp *SyncPending) fetchAndCache(ref string) {
-	if sp.store == nil {
-		return
-	}
-
+// fetchObject reads and verifies the upstream candidate without mutating local storage.
+func (sp *SyncPending) fetchObject(ref string) ([]byte, error) {
 	url := sp.upstream.baseURL + "/" + ref
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := sp.upstream.client.Do(req)
 	if err != nil {
-		log.Printf("[proxy] WARN: sync fetch %s: %v", ref, err)
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("[proxy] WARN: sync fetch read %s: %v", ref, err)
-		return
+		return nil, err
+	}
+	if err := object.VerifyEnvelope(data); err != nil {
+		return nil, err
 	}
 
 	_, item, err := object.ParseEnvelope(data)
 	if err != nil {
-		log.Printf("[proxy] WARN: sync fetch parse %s: %v", ref, err)
-		return
+		return nil, err
 	}
-
-	ts, _ := item.Timestamp()
-	if err := sp.store.Write(ref, data, ts); err != nil {
-		log.Printf("[proxy] WARN: sync fetch store %s: %v", ref, err)
-		return
+	if item.Ref() != ref {
+		return nil, fmt.Errorf("upstream returned a different ref")
 	}
-	if sp.index != nil {
-		sp.index.Update(ref, item, ts)
-	}
-	log.Printf("[proxy] sync: fetched newer %s from upstream", ref)
+	return data, nil
 }
 
 // sleepOrStop waits for the given duration or returns false if stop was signaled.

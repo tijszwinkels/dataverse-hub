@@ -40,6 +40,36 @@ docker run -p 5678:5678 -v ./dataverse001:/dataverse001 hub
 
 **Proxy mode** (default) — caches locally, forwards to an upstream hub. Falls back to local cache when upstream is unreachable. Pending writes are queued and synced when connectivity returns.
 
+### Offline revision conflicts
+
+An equal revision number does not prove equal content: two offline writers can
+independently create different edits at revision 3. Proxy synchronization compares
+the signed items. A conflict returns `409 REVISION_CONFLICT` on object reads,
+search, and inbound queries that encounter it. Re-signatures and unsigned
+transport metadata do not create conflicts. Private local objects remain hidden
+from unauthorized callers.
+
+The existing local edit stays in place. The incoming candidate is preserved under
+`<store_dir>/conflicts/<sha256>.json`, outside the live index. If a background
+upload is rejected, its submitted candidate is preserved in
+`<store_dir>/sync_conflicts/<sha256>.json` before leaving the retry queue. Neither
+path depends on `backup_enabled`. Archive failure keeps the edit pending, and an
+acknowledgement for an earlier upload cannot remove a newer queued edit. Identical
+replays are acknowledged without creating conflicts.
+
+Conflict errors identify the ref and revision; server logs identify the archive
+file. Compare the local and upstream candidates and explicitly publish a resolved
+revision higher than both. Archives remain available for manual recovery after
+resolution; they are not automatically garbage-collected or served by the API.
+Ordinary higher-revision replication continues to follow the existing policy;
+the hub does not infer ancestry or perform automatic content merges.
+
+Upstream refreshes fetch full objects instead of using revision-only ETags, which
+could incorrectly return 304 for conflicting edits. This trades additional
+bandwidth for reliable conflict detection. Client-facing ETags and `If-Match`
+write preconditions remain supported. Freenet's contract-level convergence rule
+is separate from this application-level conflict policy.
+
 ## Configuration
 
 Configure via TOML file, environment variables, or both. Precedence: **defaults < config file < env vars**.

@@ -3,6 +3,7 @@ package serving
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -197,14 +198,12 @@ func (p *Proxy) handleGetObject(w http.ResponseWriter, r *http.Request) {
 // optionally its page-relation / default-viewer dependencies (needed only when
 // an HTML representation may be served). It returns ok=true when the caller
 // should proceed to serve from the local cache, and ok=false when it has
-// already written a terminal response (404 for a missing object, a forwarded
-// non-gateway upstream error, or a 500). On a transient upstream failure
+// already written a terminal response (404 for a missing object, 409 for a
+// conflict, a forwarded non-gateway upstream error, or a 500). On a transient upstream failure
 // (unreachable or gateway-down) it returns ok=true so the caller falls back to
-// the local cache. The upstream conditional request uses OUR cached revision,
-// never the client's ETag.
+// the local cache. Upstream reads fetch full objects because revision-only
+// validators cannot distinguish independently edited copies.
 func (p *Proxy) syncFromUpstream(w http.ResponseWriter, r *http.Request, ref string, syncPageDeps bool) bool {
-	upstreamETag := p.buildUpstreamETag(ref)
-
 	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		log.Printf("[proxy] ERROR: GET /%s: build request: %v", ref, err)
@@ -212,9 +211,6 @@ func (p *Proxy) syncFromUpstream(w http.ResponseWriter, r *http.Request, ref str
 		return false
 	}
 	upstreamReq.Header.Set("Accept", "application/json")
-	if upstreamETag != "" {
-		upstreamReq.Header.Set("If-None-Match", upstreamETag)
-	}
 
 	resp, err := p.upstream.Do(upstreamReq, nil)
 	if err != nil {
@@ -236,7 +232,10 @@ func (p *Proxy) syncFromUpstream(w http.ResponseWriter, r *http.Request, ref str
 			writeError(w, r, http.StatusInternalServerError, "internal error", "INTERNAL")
 			return false
 		}
-		p.CacheLocally(ref, body)
+		if err := p.CacheLocally(ref, body); err != nil {
+			p.writeCacheError(w, r, ref, err)
+			return false
+		}
 
 	case http.StatusNotFound:
 		localData, _ := p.store.Read(ref)
@@ -375,26 +374,11 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
-		// Cache the upstream-accepted object. Lock per ref so the
-		// backup→write→index sequence cannot interleave with another writer.
-		// Wrapped in a closure so the lock is released via defer even if a
-		// store/index call panics (chi's Recoverer would otherwise swallow the
-		// panic and leak the lock, deadlocking future PUTs to this ref).
-		func() {
-			p.writeLocks.Lock(ref)
-			defer p.writeLocks.Unlock(ref)
-			if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
-				if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
-					log.Printf("[proxy] WARN: PUT /%s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
-				}
-			}
-			ts, _ := item.Timestamp()
-			p.store.Write(ref, canonical, ts)
-			p.index.Update(ref, item, ts, realms)
-		}()
-		// Update vhost hash map for PAGE objects
-		if p.Vhost != nil && item.Type == "PAGE" {
-			p.Vhost.AddPage(ref)
+		// A local edit may have arrived while the upload was in flight.
+		// Reconcile under the same lock/rules as upstream reads.
+		if err := p.CacheLocally(ref, canonical); err != nil {
+			p.writeCacheError(w, r, ref, err)
+			return
 		}
 		log.Printf("[proxy] stored %s rev %d (%s)", ref, item.Revision, item.Type)
 
@@ -404,8 +388,8 @@ func (p *Proxy) handlePutObject(w http.ResponseWriter, r *http.Request) {
 		w.Write(canonical)
 
 	case http.StatusConflict:
-		// Upstream has newer revision — fetch and cache it
-		log.Printf("[proxy] PUT /%s: upstream conflict, fetching newer version", ref)
+		// Compare the upstream candidate without discarding an equal-revision edit.
+		log.Printf("[proxy] PUT /%s: upstream conflict, fetching candidate", ref)
 		go p.fetchAndCacheFromUpstream(ref)
 		respBody, _ := io.ReadAll(resp.Body)
 		forwardResponse(w, r, resp, respBody)
@@ -488,9 +472,10 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 	}
 
 	body, _ := io.ReadAll(resp.Body)
-
-	// Background-cache upstream items we don't have locally yet
-	go p.cacheUpstreamListRefs(body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		forwardResponse(w, r, resp, body)
+		return
+	}
 
 	authPK := auth.AuthPubkey(r)
 
@@ -504,8 +489,42 @@ func (p *Proxy) forwardListEndpoint(w http.ResponseWriter, r *http.Request, upst
 		w.Write(body)
 		return
 	}
+	// A successful list must not select a different equal-revision edit from
+	// GET. Only compare copies visible to this caller (no private-existence leak).
+	for _, candidate := range upstreamResp.Items {
+		_, item, err := object.ParseEnvelope(candidate)
+		if err != nil {
+			continue
+		}
+		meta, exists := p.index.GetMeta(item.Ref())
+		if !exists || meta.Revision != item.Revision || !realm.CanRead(meta.Realms, authPK, p.index.Resolver()) {
+			continue
+		}
+		if item.Type == "BLOB" {
+			// Lists omit BLOB payloads; compare the full signed object.
+			if !p.syncFromUpstream(w, r, item.Ref(), false) {
+				return
+			}
+		} else if err := p.CacheLocally(item.Ref(), candidate); err != nil {
+			p.writeCacheError(w, r, item.Ref(), err)
+			return
+		}
+	}
+	// Background-cache upstream items we don't have locally yet.
+	go p.cacheUpstreamListRefs(body)
 
 	p.mergeLocalIntoUpstream(w, r, upstreamResp, authPK)
+}
+
+func (p *Proxy) writeCacheError(w http.ResponseWriter, r *http.Request, ref string, err error) {
+	log.Printf("[proxy] ERROR: cache %s: %v", ref, err)
+	if meta, found := p.index.GetMeta(ref); found && !realm.CanRead(meta.Realms, auth.AuthPubkey(r), p.index.Resolver()) {
+		writeError(w, r, http.StatusNotFound, "object not found", "NOT_FOUND")
+	} else if errors.Is(err, object.ErrRevisionConflict) {
+		writeError(w, r, http.StatusConflict, err.Error(), "REVISION_CONFLICT")
+	} else {
+		writeError(w, r, http.StatusInternalServerError, "could not safely cache upstream object", "INTERNAL")
+	}
 }
 
 // serveLocalList serves list/inbound results from the local index (fallback).
@@ -706,14 +725,18 @@ func extractSortKey(raw json.RawMessage) (time.Time, string) {
 	return ts, ref
 }
 
-// cacheLocally stores an object in the local store and updates the index.
+// CacheLocally stores an object in the local store and updates the index.
 // Refuses to downgrade: if local has a newer revision, pushes local to upstream instead.
-func (p *Proxy) CacheLocally(ref string, data []byte) {
-	_, item, err := object.ParseEnvelope(data)
+func (p *Proxy) CacheLocally(ref string, data []byte) error {
+	env, item, err := object.ParseEnvelope(data)
 	if err != nil {
-		log.Printf("[proxy] WARN: cache %s: parse: %v", ref, err)
-		return
+		return err
 	}
+	if item.Ref() != ref {
+		return fmt.Errorf("upstream returned a different ref")
+	}
+	p.writeLocks.Lock(ref)
+	defer p.writeLocks.Unlock(ref)
 
 	if existingMeta, isUpdate := p.index.GetMeta(ref); isUpdate {
 		if existingMeta.Revision > item.Revision {
@@ -722,43 +745,57 @@ func (p *Proxy) CacheLocally(ref string, data []byte) {
 			if localData, err := p.store.Read(ref); err == nil && localData != nil {
 				go p.pushToUpstream(ref, localData)
 			}
-			return
+			return nil
 		}
 		if existingMeta.Revision == item.Revision {
-			return // same revision, nothing to do
+			local, err := p.store.Read(ref)
+			if err != nil {
+				return err
+			}
+			same, err := object.SameItem(local, data)
+			if err != nil {
+				return err
+			}
+			if same {
+				return nil
+			}
+			if err := object.VerifyEnvelope(data); err != nil {
+				return err
+			}
+			path, err := p.store.PreserveConflict(data)
+			if err != nil {
+				return err
+			}
+			log.Printf("[proxy] WARN: %s revision %d conflicts; incoming edit preserved at %s", ref, item.Revision, path)
+			return fmt.Errorf("%w for %s at revision %d; both edits retained; resolve with a higher revision", object.ErrRevisionConflict, ref, item.Revision)
 		}
 		// Incoming is newer — backup old before overwriting
 		if err := p.store.Backup(ref, existingMeta.Revision); err != nil {
-			log.Printf("[proxy] WARN: cache %s: backup rev %d failed: %v", ref, existingMeta.Revision, err)
+			return fmt.Errorf("backup revision %d: %w", existingMeta.Revision, err)
 		}
 	}
 
 	ts, _ := item.Timestamp()
 	if err := p.store.Write(ref, data, ts); err != nil {
-		log.Printf("[proxy] WARN: cache %s: write: %v", ref, err)
-		return
+		return err
 	}
-	p.index.Update(ref, item, ts)
+	p.index.Update(ref, item, ts, object.ResolveIn(env, item))
 	// Update vhost hash map for PAGE objects
 	if p.Vhost != nil && item.Type == "PAGE" {
 		p.Vhost.AddPage(ref)
 	}
 	log.Printf("[proxy] cached %s rev %d (%s)", ref, item.Revision, item.Type)
+	return nil
 }
 
 // ensureFresh checks upstream for a newer version of ref and updates local cache.
 // On failure, local cache is left as-is (best effort).
 func (p *Proxy) ensureFresh(ref string) {
-	upstreamETag := p.buildUpstreamETag(ref)
-
 	req, err := http.NewRequest(http.MethodGet, p.upstream.BaseURL()+"/"+ref, nil)
 	if err != nil {
 		return
 	}
 	req.Header.Set("Accept", "application/json")
-	if upstreamETag != "" {
-		req.Header.Set("If-None-Match", upstreamETag)
-	}
 
 	resp, err := p.upstream.Do(req, nil)
 	if err != nil {
@@ -774,7 +811,9 @@ func (p *Proxy) ensureFresh(ref string) {
 		if err != nil {
 			return
 		}
-		p.CacheLocally(ref, body)
+		if err := p.CacheLocally(ref, body); err != nil {
+			log.Printf("[proxy] WARN: refresh %s: %v", ref, err)
+		}
 	case http.StatusNotFound:
 		if data, err := p.store.Read(ref); err == nil && data != nil {
 			go p.pushToUpstream(ref, data)
@@ -850,18 +889,6 @@ func (p *Proxy) ensurePageDepsFresh(ref string) {
 }
 
 // --- internal helpers ---
-
-// buildUpstreamETag returns the ETag to send to upstream based on our local
-// cache state. Always uses OUR cached revision — never the client's ETag.
-// The upstream question is "is my cache current?", which is independent of
-// what the client has.
-func (p *Proxy) buildUpstreamETag(ref string) string {
-	meta, found := p.index.GetMeta(ref)
-	if !found {
-		return ""
-	}
-	return `"` + strconv.Itoa(meta.Revision) + `"`
-}
 
 // serveFromLocalCache reads from local store and serves with content negotiation.
 func (p *Proxy) serveFromLocalCache(w http.ResponseWriter, r *http.Request, ref string) {
@@ -1090,7 +1117,9 @@ func (p *Proxy) fetchAndCacheFromUpstream(ref string) {
 		log.Printf("[proxy] WARN: fetch-after-conflict %s: read body: %v", ref, err)
 		return
 	}
-	p.CacheLocally(ref, body)
+	if err := p.CacheLocally(ref, body); err != nil {
+		log.Printf("[proxy] WARN: refresh rejected write %s: %v", ref, err)
+	}
 }
 
 // cacheUpstreamListRefs parses a list response from upstream and triggers

@@ -200,6 +200,15 @@ Objects can belong to multiple realms: `["dataverse001", "acme_internal"]`. Real
 
 One object per composite key. Updates increment `revision`. On sync conflicts, higher revision wins.
 
+For equal revisions, hub/SDK synchronization compares the canonical signed `item`.
+Matching items are identical even if signatures or unsigned envelope metadata differ.
+Different items at the same key and revision require explicit conflict resolution:
+retain the local candidate, preserve the incoming candidate outside the live index,
+and report the conflict. Resolution publishes a reviewed item at a higher revision.
+A revision counter alone does not establish ancestry; these rules do not detect
+every concurrent edit at different revisions or prescribe a transport contract's
+internal convergence algorithm.
+
 ---
 
 # dataverse001 — A Global Database on instructionGraph001
@@ -281,5 +290,4 @@ If `rights` is absent or a field within it is absent, no assumption is made — 
 Much of the dataverse's structural foundation — types, schemas, protocols, recipes — is public domain (`CC0-1.0`) and explicitly available for AI training. Not just by a few large corporations, but by anyone.
 
 We encourage contributors to share under `CC0-1.0` with `"ai_training_allowed": true`. But it's your data — use whatever license fits your intent.
-
 
